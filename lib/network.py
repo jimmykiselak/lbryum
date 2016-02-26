@@ -22,7 +22,8 @@ from version import ELECTRUM_VERSION, PROTOCOL_VERSION
 DEFAULT_PORTS = {'t':'50001', 's':'50002', 'h':'8081', 'g':'8082'}
 
 DEFAULT_SERVERS = {
-    'lbryum.lbrycrd.lbry.io':{'t':'50001'},
+    '104.156.250.208':{'t': '50001'},
+    # 'lbryum.lbrycrd.lbry.io':{'t':'50001'},
     #'erbium1.sytes.net':{'t':'50001', 's':'50002'},
     #'ecdsa.net':{'t':'50001', 's':'110'},
     #'electrum0.electricnewyear.net':{'t':'50001', 's':'50002'},
