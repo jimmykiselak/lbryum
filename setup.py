@@ -16,6 +16,11 @@ if sys.version_info[:3] < (2, 7, 0):
 
 data_files = []
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--root_path", default=None)
+opts = parser.parse_args()
+
+
 if False and platform.system() in ['Linux', 'FreeBSD', 'DragonFly']:
     usr_share = os.path.join(sys.prefix, "share")
     if not os.access(opts.root_path + usr_share, os.W_OK) and \
@@ -80,3 +85,4 @@ setup(
     license="GNU GPLv3",
     url="https://lbry.io",
     long_description="""Lightweight LBRYcrd Wallet"""
+)
