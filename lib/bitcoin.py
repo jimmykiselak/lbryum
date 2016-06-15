@@ -4,18 +4,25 @@
 # Electrum - lightweight Bitcoin client
 # Copyright (C) 2011 thomasv@gitorious
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+# Permission is hereby granted, free of charge, to any person
+# obtaining a copy of this software and associated documentation files
+# (the "Software"), to deal in the Software without restriction,
+# including without limitation the rights to use, copy, modify, merge,
+# publish, distribute, sublicense, and/or sell copies of the Software,
+# and to permit persons to whom the Software is furnished to do so,
+# subject to the following conditions:
 #
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-# GNU General Public License for more details.
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
 #
-# You should have received a copy of the GNU General Public License
-# along with this program. If not, see <http://www.gnu.org/licenses/>.
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+# BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+# ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+# CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
 
 import hashlib
 import base64
@@ -30,6 +37,7 @@ import aes
 
 ################################## transactions
 
+FEE_STEP = 10000
 RECOMMENDED_FEE = 50000
 COINBASE_MATURITY = 100
 COIN = 100000000
@@ -205,16 +213,9 @@ def i2o_ECPublicKey(pubkey, compressed=False):
 ############ functions from pywallet #####################
 
 def hash_160(public_key):
-    try:
-        md = hashlib.new('ripemd160')
-        md.update(sha256(public_key))
-        return md.digest()
-    except Exception:
-        # not available in Android SL4a
-        import ripemd
-        md = ripemd.new(sha256(public_key))
-        return md.digest()
-
+    md = hashlib.new('ripemd160')
+    md.update(sha256(public_key))
+    return md.digest()
 
 def public_key_to_bc_address(public_key):
     h160 = hash_160(public_key)

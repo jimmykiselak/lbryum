@@ -7,7 +7,7 @@ NAME_ROOT=electrum
 
 
 # These settings probably don't need any change
-export WINEPREFIX=/opt/electrum/wine64
+export WINEPREFIX=/opt/wine64
 
 PYHOME=c:/python27
 PYTHON="wine $PYHOME/python.exe -OO -B"
@@ -45,6 +45,9 @@ cp electrum-git/LICENCE .
 # add python packages (built with make_packages)
 cp -r ../../../packages $WINEPREFIX/drive_c/electrum/
 
+# add locale dir
+cp -r ../../../lib/locale $WINEPREFIX/drive_c/electrum/lib/
+
 # Build Qt resources
 wine $WINEPREFIX/drive_c/Python27/Lib/site-packages/PyQt4/pyrcc4.exe C:/electrum/icons.qrc -o C:/electrum/lib/icons_rc.py
 wine $WINEPREFIX/drive_c/Python27/Lib/site-packages/PyQt4/pyrcc4.exe C:/electrum/icons.qrc -o C:/electrum/gui/qt/icons_rc.py
@@ -57,7 +60,8 @@ rm -rf dist/
 $PYTHON "C:/pyinstaller/pyinstaller.py" --noconfirm --ascii -w deterministic.spec
 
 # build NSIS installer
-wine "$WINEPREFIX/drive_c/Program Files (x86)/NSIS/makensis.exe" electrum.nsi
+# $VERSION could be passed to the electrum.nsi script, but this would require some rewriting in the script iself.
+wine "$WINEPREFIX/drive_c/Program Files (x86)/NSIS/makensis.exe" /DPRODUCT_VERSION=$VERSION electrum.nsi
 
 cd dist
 mv electrum.exe $NAME_ROOT-$VERSION.exe

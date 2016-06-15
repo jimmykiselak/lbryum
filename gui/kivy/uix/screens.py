@@ -3,7 +3,6 @@ from decimal import Decimal
 import re
 import datetime
 import traceback, sys
-import threading
 
 from kivy.app import App
 from kivy.cache import Cache
@@ -16,6 +15,7 @@ from kivy.uix.label import Label
 
 from kivy.lang import Builder
 from kivy.factory import Factory
+from kivy.utils import platform
 
 from lbryum.i18n import _
 from lbryum.util import profiler, parse_URI, format_time
@@ -26,6 +26,7 @@ from lbryum.plugins import run_hook
 from context_menu import ContextMenu
 
 from lbryum.paymentrequest import PR_UNPAID, PR_PAID, PR_UNKNOWN, PR_EXPIRED
+
 
 class EmptyLabel(Factory.Label):
     pass
@@ -87,18 +88,37 @@ class CScreen(Factory.Screen):
         self.add_widget(self.context_menu)
 
 
-
-
+TX_ICONS = [
+    "close",
+    "close",
+    "close",
+    "unconfirmed",
+    "close",
+    "clock1",
+    "clock2",
+    "clock3",
+    "clock4",
+    "clock5",
+    "confirmed",
+]
 
 class HistoryScreen(CScreen):
 
     tab = ObjectProperty(None)
     kvname = 'history'
+    cards = {}
 
     def __init__(self, **kwargs):
         self.ra_dialog = None
         super(HistoryScreen, self).__init__(**kwargs)
-        self.menu_actions = [ (_('Label'), self.label_dialog), (_('Details'), self.app.tx_details_dialog)]
+        self.menu_actions = [ ('Label', self.label_dialog), ('Details', self.show_tx)]
+
+    def show_tx(self, obj):
+        tx_hash = obj.tx_hash
+        tx = self.app.wallet.transactions.get(tx_hash)
+        if not tx:
+            return
+        self.app.tx_dialog(tx)
 
     def label_dialog(self, obj):
         from dialogs.label_dialog import LabelDialog
@@ -110,70 +130,45 @@ class HistoryScreen(CScreen):
         d = LabelDialog(_('Enter Transaction Label'), text, callback)
         d.open()
 
-
-    def parse_history(self, items):
-        for item in items:
-            tx_hash, conf, value, timestamp, balance = item
-            time_str = _("unknown")
-            if conf > 0:
-                try:
-                    time_str = datetime.datetime.fromtimestamp(timestamp).isoformat(' ')[:-3]
-                except Exception:
-                    time_str = _("error")
-            if conf == -1:
-                time_str = _('unverified')
-                icon = "atlas://gui/kivy/theming/light/close"
-            elif conf == 0:
-                time_str = _('pending')
-                icon = "atlas://gui/kivy/theming/light/unconfirmed"
-            elif conf < 6:
-                conf = max(1, conf)
-                icon = "atlas://gui/kivy/theming/light/clock{}".format(conf)
-            else:
-                icon = "atlas://gui/kivy/theming/light/confirmed"
-
-            label = self.app.wallet.get_label(tx_hash) if tx_hash else _('Pruned transaction outputs')
-            date = timestamp_to_datetime(timestamp)
+    def get_card(self, tx_hash, height, conf, timestamp, value, balance):
+        status, status_str = self.app.wallet.get_tx_status(tx_hash, height, conf, timestamp)
+        icon = "atlas://gui/kivy/theming/light/" + TX_ICONS[status]
+        label = self.app.wallet.get_label(tx_hash) if tx_hash else _('Pruned transaction outputs')
+        date = timestamp_to_datetime(timestamp)
+        ri = self.cards.get(tx_hash)
+        if ri is None:
+            ri = Factory.HistoryItem()
+            ri.screen = self
+            ri.tx_hash = tx_hash
+            self.cards[tx_hash] = ri
+        ri.icon = icon
+        ri.date = status_str
+        ri.message = label
+        ri.value = value or 0
+        ri.value_known = value is not None
+        ri.confirmations = conf
+        if self.app.fiat_unit and date:
             rate = run_hook('history_rate', date)
-            if self.app.fiat_unit:
-                quote_text = "..." if rate is None else "{0:.3} {1}".format(Decimal(value) / 100000000 * Decimal(rate), self.app.fiat_unit)
-            else:
-                quote_text = ''
-            yield (conf, icon, time_str, label, value, tx_hash, quote_text)
+            if rate:
+                s = run_hook('value_str', value, rate)
+                ri.quote_text = '' if s is None else s + ' ' + self.app.fiat_unit
+        return ri
 
     def update(self, see_all=False):
         if self.app.wallet is None:
             return
-
-        history = self.parse_history(reversed(
-            self.app.wallet.get_history(self.app.current_account)))
-        # repopulate History Card
+        history = reversed(self.app.wallet.get_history(self.app.current_account))
         history_card = self.screen.ids.history_container
         history_card.clear_widgets()
         count = 0
         for item in history:
+            ri = self.get_card(*item)
             count += 1
-            conf, icon, date_time, message, value, tx, quote_text = item
-            ri = Factory.HistoryItem()
-            ri.icon = icon
-            ri.date = date_time
-            ri.message = message
-            ri.value = value
-            ri.quote_text = quote_text
-            ri.confirmations = conf
-            ri.tx_hash = tx
-            ri.screen = self
             history_card.add_widget(ri)
-            if count == 8 and not see_all:
-                break
 
         if count == 0:
             msg = _('This screen shows your list of transactions. It is currently empty.')
             history_card.add_widget(EmptyLabel(text=msg))
-
-
-
-
 
 
 class SendScreen(CScreen):
@@ -181,51 +176,83 @@ class SendScreen(CScreen):
     kvname = 'send'
     payment_request = None
 
-    def set_URI(self, uri):
+    def set_URI(self, text):
+        import electrum
+        try:
+            uri = electrum.util.parse_URI(text, self.app.on_pr)
+        except:
+            self.app.show_info(_("Not a Bitcoin URI"))
+            return
+        amount = uri.get('amount')
         self.screen.address = uri.get('address', '')
         self.screen.message = uri.get('message', '')
-        amount = uri.get('amount')
-        if amount:
-            self.screen.amount = self.app.format_amount_and_units(amount)
+        self.screen.amount = self.app.format_amount_and_units(amount) if amount else ''
+        self.payment_request = None
+        self.screen.is_pr = False
 
     def update(self):
-        if self.app.current_invoice:
-            self.set_request(self.app.current_invoice)
+        pass
 
     def do_clear(self):
         self.screen.amount = ''
         self.screen.message = ''
         self.screen.address = ''
         self.payment_request = None
-
-    def amount_dialog(self):
-        Clock.schedule_once(lambda dt: self.app.amount_dialog(self, True), .25)
+        self.screen.is_pr = False
 
     def set_request(self, pr):
-        self.payment_request = pr
         self.screen.address = pr.get_requestor()
         amount = pr.get_amount()
-        if amount:
-            self.screen.amount = self.app.format_amount_and_units(amount)
+        self.screen.amount = self.app.format_amount_and_units(amount) if amount else ''
         self.screen.message = pr.get_memo()
+        if pr.is_pr():
+            self.screen.is_pr = True
+            self.payment_request = pr
+        else:
+            self.screen.is_pr = False
+            self.payment_request = None
+
+    def do_save(self):
+        if not self.screen.address:
+            return
+        if self.screen.is_pr:
+            # it sould be already saved
+            return
+        # save address as invoice
+        from electrum.paymentrequest import make_unsigned_request, PaymentRequest
+        req = {'address':self.screen.address, 'memo':self.screen.message}
+        amount = self.app.get_amount(self.screen.amount) if self.screen.amount else 0
+        req['amount'] = amount
+        pr = make_unsigned_request(req).SerializeToString()
+        pr = PaymentRequest(pr)
+        self.app.invoices.add(pr)
+        self.app.update_tab('invoices')
+        self.app.show_info(_("Invoice saved"))
+        if pr.is_pr():
+            self.screen.is_pr = True
+            self.payment_request = pr
+        else:
+            self.screen.is_pr = False
+            self.payment_request = None
 
     def do_paste(self):
-        contents = unicode(self.app._clipboard.get())
-        try:
-            uri = parse_URI(contents)
-        except:
-            self.app.show_info("Invalid URI", contents)
+        contents = unicode(self.app._clipboard.paste())
+        if not contents:
+            self.app.show_info(_("Clipboard is empty"))
             return
-        self.set_URI(uri)
+        self.set_URI(contents)
 
     def do_send(self):
-        if self.payment_request:
+        if self.screen.is_pr:
             if self.payment_request.has_expired():
                 self.app.show_error(_('Payment request has expired'))
                 return
             outputs = self.payment_request.get_outputs()
         else:
             address = str(self.screen.address)
+            if not address:
+                self.app.show_error(_('Recipient not specified.') + ' ' + _('Please scan a Bitcoin address or a payment request'))
+                return
             if not bitcoin.is_address(address):
                 self.app.show_error(_('Invalid Bitcoin Address') + ':\n' + address)
                 return
@@ -236,52 +263,83 @@ class SendScreen(CScreen):
                 return
             outputs = [(bitcoin.TYPE_ADDRESS, address, amount)]
         message = unicode(self.screen.message)
-        fee = None
-        self.app.protected(self.send_tx, (outputs, fee, message))
-
-    def send_tx(self, *args):
-        self.app.show_info("Sending...")
-        threading.Thread(target=self.send_tx_thread, args=args).start()
-
-    def send_tx_thread(self, outputs, fee, label, password):
+        amount = sum(map(lambda x:x[2], outputs))
         # make unsigned transaction
         coins = self.app.wallet.get_spendable_coins()
+        config = self.app.electrum_config
         try:
-            tx = self.app.wallet.make_unsigned_transaction(coins, outputs, self.app.electrum_config, fee)
+            tx = self.app.wallet.make_unsigned_transaction(coins, outputs, config, None)
+        except NotEnoughFunds:
+            self.app.show_error(_("Not enough funds"))
+            return
         except Exception as e:
             traceback.print_exc(file=sys.stdout)
             self.app.show_error(str(e))
             return
-        # sign transaction
-        try:
-            self.app.wallet.sign_transaction(tx, password)
-        except Exception as e:
-            traceback.print_exc(file=sys.stdout)
-            self.app.show_error(str(e))
-            return
-        # broadcast
-        ok, txid = self.app.wallet.sendtx(tx)
-        self.app.show_info(txid)
+        if self.app.electrum_config.get('use_rbf'):
+            tx.set_sequence(0)
+        fee = tx.get_fee()
+        msg = [
+            _("Amount to be sent") + ": " + self.app.format_amount_and_units(amount),
+            _("Mining fee") + ": " + self.app.format_amount_and_units(fee),
+        ]
+        if fee >= config.get('confirm_fee', 100000):
+            msg.append(_('Warning')+ ': ' + _("The fee for this transaction seems unusually high."))
+        msg.append(_("Enter your PIN code to proceed"))
+        self.app.protected('\n'.join(msg), self.send_tx, (tx, message))
+
+    def send_tx(self, tx, message, password):
+        def on_success(tx):
+            if tx.is_complete():
+                self.app.broadcast(tx, self.payment_request)
+                self.app.wallet.set_label(tx.hash(), message)
+            else:
+                self.app.tx_dialog(tx)
+        def on_failure(error):
+            self.app.show_error(error)
+        if self.app.wallet.can_sign(tx):
+            self.app.show_info("Signing...")
+            self.app.sign_tx(tx, password, on_success, on_failure)
+        else:
+            self.app.tx_dialog(tx)
 
 
 class ReceiveScreen(CScreen):
 
     kvname = 'receive'
-    
+
     def update(self):
-        addr = self.app.get_receive_address()
+        if not self.screen.address:
+            self.get_new_address()
+        else:
+            status = self.app.wallet.get_request_status(self.screen.address)
+            self.screen.status = _('Payment received') if status == PR_PAID else ''
+
+    def clear(self):
+        self.screen.address = ''
+        self.screen.amount = ''
+        self.screen.message = ''
+
+    def get_new_address(self):
+        if not self.app.wallet:
+            return False
+        addr = self.app.wallet.get_unused_address(None)
+        if addr is None:
+            return False
+        self.clear()
         self.screen.address = addr
-        req = self.app.wallet.receive_requests.get(addr)
+        return True
+
+    def on_address(self, addr):
+        req = self.app.wallet.get_payment_request(addr, self.app.electrum_config)
+        self.screen.status = ''
         if req:
             self.screen.message = unicode(req.get('memo', ''))
             amount = req.get('amount')
-            if amount:
-                self.screen.amount = self.app.format_amount_and_units(amount)
-
-    def amount_callback(self, popup):
-        amount_label = self.screen.ids.get('amount')
-        amount_label.text = popup.ids.amount_label.text
-        self.update_qr()
+            self.screen.amount = self.app.format_amount_and_units(amount) if amount else ''
+            status = req.get('status', PR_UNKNOWN)
+            self.screen.status = _('Payment received') if status == PR_PAID else ''
+        Clock.schedule_once(lambda dt: self.update_qr())
 
     def get_URI(self):
         from lbryum.util import create_URI
@@ -298,133 +356,166 @@ class ReceiveScreen(CScreen):
         qr = self.screen.ids.qr
         qr.set_data(uri)
 
+    def do_share(self):
+        if platform != 'android':
+            return
+        uri = self.get_URI()
+        from jnius import autoclass, cast
+        JS = autoclass('java.lang.String')
+        Intent = autoclass('android.content.Intent')
+        sendIntent = Intent()
+        sendIntent.setAction(Intent.ACTION_SEND)
+        sendIntent.setType("text/plain")
+        sendIntent.putExtra(Intent.EXTRA_TEXT, JS(uri))
+        PythonActivity = autoclass('org.renpy.android.PythonActivity')
+        currentActivity = cast('android.app.Activity', PythonActivity.mActivity)
+        it = Intent.createChooser(sendIntent, cast('java.lang.CharSequence', JS("Share Bitcoin Request")))
+        currentActivity.startActivity(it)
+
     def do_copy(self):
         uri = self.get_URI()
-        self.app._clipboard.put(uri, 'text/plain')
+        self.app._clipboard.copy(uri)
+        self.app.show_info(_('Request copied to clipboard'))
 
-    def do_save(self):
+    def save_request(self):
         addr = str(self.screen.address)
         amount = str(self.screen.amount)
-        message = str(self.screen.message) #.ids.message_input.text)
-        if not message and not amount:
-            self.app.show_error(_('No message or amount'))
-            return
-        if amount:
-            amount = self.app.get_amount(amount)
-        else:
-            amount = 0
-        print "saving", amount, message
+        message = unicode(self.screen.message)
+        amount = self.app.get_amount(amount) if amount else 0
         req = self.app.wallet.make_payment_request(addr, amount, message, None)
         self.app.wallet.add_payment_request(req, self.app.electrum_config)
-        self.app.show_error(_('Request saved'))
         self.app.update_tab('requests')
 
+    def on_amount_or_message(self):
+        self.save_request()
+        Clock.schedule_once(lambda dt: self.update_qr())
+
     def do_new(self):
-        self.app.receive_address = None
-        self.screen.amount = ''
-        self.screen.message = ''
-        self.update()
+        addr = self.get_new_address()
+        if not addr:
+            self.app.show_info(_('Please use the existing requests first.'))
+        else:
+            self.save_request()
+            self.app.show_info(_('New request added to your list.'))
 
 
-class ContactsScreen(CScreen):
-    kvname = 'contacts'
-
-    def add_new_contact(self):
-        dlg = Cache.get('electrum_widgets', 'NewContactDialog')
-        if not dlg:
-            dlg = NewContactDialog()
-            Cache.append('electrum_widgets', 'NewContactDialog', dlg)
-        dlg.open()
-
-    def update(self):
-        contact_list = self.screen.ids.contact_container
-        contact_list.clear_widgets()
-        child = -1
-        children = contact_list.children
-        for key in sorted(self.app.contacts.keys()):
-            _type, value = self.app.contacts[key]
-            child += 1
-            try:
-                if children[child].label == value:
-                    continue
-            except IndexError:
-                pass
-            ci = Factory.ContactItem()
-            ci.address = key
-            ci.label = value
-            contact_list.add_widget(ci)
+invoice_text = {
+    PR_UNPAID:_('Pending'),
+    PR_UNKNOWN:_('Unknown'),
+    PR_PAID:_('Paid'),
+    PR_EXPIRED:_('Expired')
+}
+request_text = {
+    PR_UNPAID: _('Pending'),
+    PR_UNKNOWN: _('Unknown'),
+    PR_PAID: _('Received'),
+    PR_EXPIRED: _('Expired')
+}
+pr_icon = {
+    PR_UNPAID: 'atlas://gui/kivy/theming/light/important',
+    PR_UNKNOWN: 'atlas://gui/kivy/theming/light/important',
+    PR_PAID: 'atlas://gui/kivy/theming/light/confirmed',
+    PR_EXPIRED: 'atlas://gui/kivy/theming/light/close'
+}
 
 
 class InvoicesScreen(CScreen):
     kvname = 'invoices'
+    cards = {}
+
+    def get_card(self, pr):
+        key = pr.get_id()
+        ci = self.cards.get(key)
+        if ci is None:
+            ci = Factory.InvoiceItem()
+            ci.key = key
+            ci.screen = self
+            self.cards[key] = ci
+
+        ci.requestor = pr.get_requestor()
+        ci.memo = pr.get_memo()
+        amount = pr.get_amount()
+        if amount:
+            ci.amount = self.app.format_amount_and_units(amount)
+            status = self.app.invoices.get_status(ci.key)
+            ci.status = invoice_text[status]
+            ci.icon = pr_icon[status]
+        else:
+            ci.amount = _('No Amount')
+            ci.status = ''
+        exp = pr.get_expiration_date()
+        ci.date = format_time(exp) if exp else _('Never')
+        return ci
 
     def update(self):
-        self.menu_actions = [(_('Pay'), self.do_pay), (_('Delete'), self.do_delete)]
+        self.menu_actions = [('Pay', self.do_pay), ('Details', self.do_view), ('Delete', self.do_delete)]
         invoices_list = self.screen.ids.invoices_container
         invoices_list.clear_widgets()
-
         _list = self.app.invoices.sorted_list()
         for pr in _list:
-            ci = Factory.InvoiceItem()
-            ci.key = pr.get_id()
-            ci.requestor = pr.get_requestor()
-            ci.memo = pr.memo
-            ci.amount = self.app.format_amount_and_units(pr.get_amount())
-            status = self.app.invoices.get_status(ci.key)
-            if status == PR_PAID:
-                ci.icon = "atlas://gui/kivy/theming/light/confirmed"
-            elif status == PR_EXPIRED:
-                ci.icon = "atlas://gui/kivy/theming/light/important"
-            else:
-                ci.icon = "atlas://gui/kivy/theming/light/important"
-            exp = pr.get_expiration_date()
-            ci.date = format_time(exp) if exp else _('Never')
-            ci.screen = self
+            ci = self.get_card(pr)
             invoices_list.add_widget(ci)
-
         if not _list:
-            msg = _('This screen shows the list of payment requests that have been sent to you.')
+            msg = _('This screen shows the list of payment requests that have been sent to you. You may also use it to store contact addresses.')
             invoices_list.add_widget(EmptyLabel(text=msg))
 
-
     def do_pay(self, obj):
-        self.app.do_pay(obj)
+        pr = self.app.invoices.get(obj.key)
+        self.app.on_pr(pr)
+
+    def do_view(self, obj):
+        pr = self.app.invoices.get(obj.key)
+        pr.verify(self.app.contacts)
+        self.app.show_pr_details(pr.get_dict(), obj.status, True)
 
     def do_delete(self, obj):
-        self.app.invoices.remove(obj.key)
-        self.app.update_tab('invoices')
+        from dialogs.question import Question
+        def cb():
+            self.app.invoices.remove(obj.key)
+            self.app.update_tab('invoices')
+        d = Question(_('Delete invoice?'), cb)
+        d.open()
+
 
 class RequestsScreen(CScreen):
     kvname = 'requests'
+    cards = {}
+
+    def get_card(self, req):
+        address = req['address']
+        timestamp = req.get('time', 0)
+        amount = req.get('amount')
+        expiration = req.get('exp', None)
+        status = req.get('status')
+        signature = req.get('sig')
+
+        ci = self.cards.get(address)
+        if ci is None:
+            ci = Factory.RequestItem()
+            ci.screen = self
+            ci.address = address
+            self.cards[address] = ci
+
+        ci.memo = self.app.wallet.get_label(address)
+        if amount:
+            status = req.get('status')
+            ci.status = request_text[status]
+        else:
+            received = self.app.wallet.get_addr_received(address)
+            ci.status = self.app.format_amount_and_units(amount)
+        ci.icon = pr_icon[status]
+        ci.amount = self.app.format_amount_and_units(amount) if amount else _('No Amount')
+        ci.date = format_time(timestamp)
+        return ci
 
     def update(self):
-
-        self.menu_actions = [(_('Show'), self.do_show), (_('Delete'), self.do_delete)]
+        self.menu_actions = [('Show', self.do_show), ('Details', self.do_view), ('Delete', self.do_delete)]
         requests_list = self.screen.ids.requests_container
         requests_list.clear_widgets()
-        _list = self.app.wallet.get_sorted_requests(self.app.electrum_config)
+        _list = self.app.wallet.get_sorted_requests(self.app.electrum_config) if self.app.wallet else []
         for req in _list:
-            address = req['address']
-            timestamp = req.get('time', 0)
-            amount = req.get('amount')
-            expiration = req.get('exp', None)
-            status = req.get('status')
-            signature = req.get('sig')
-            ci = Factory.RequestItem()
-            ci.address = req['address']
-            ci.memo = self.app.wallet.get_label(address)
-            status = req.get('status')
-            if status == PR_PAID:
-                ci.icon = "atlas://gui/kivy/theming/light/confirmed"
-            elif status == PR_EXPIRED:
-                ci.icon = "atlas://gui/kivy/theming/light/important"
-            else:
-                ci.icon = "atlas://gui/kivy/theming/light/important"
-            ci.amount = self.app.format_amount_and_units(amount) if amount else ''
-            ci.date = format_time(timestamp)
-            ci.screen = self
+            ci = self.get_card(req)
             requests_list.add_widget(ci)
-
         if not _list:
             msg = _('This screen shows the list of payment requests you made.')
             requests_list.add_widget(EmptyLabel(text=msg))
@@ -432,27 +523,29 @@ class RequestsScreen(CScreen):
     def do_show(self, obj):
         self.app.show_request(obj.address)
 
+    def do_view(self, obj):
+        req = self.app.wallet.get_payment_request(obj.address, self.app.electrum_config)
+        status = req.get('status')
+        amount = req.get('amount')
+        address = req['address']
+        if amount:
+            status = req.get('status')
+            status = request_text[status]
+        else:
+            received_amount = self.app.wallet.get_addr_received(address)
+            status = self.app.format_amount_and_units(received_amount)
+
+        self.app.show_pr_details(req, status, False)
+
     def do_delete(self, obj):
-        self.app.wallet.remove_payment_request(obj.address, self.app.electrum_config)
-        self.update()
+        from dialogs.question import Question
+        def cb():
+            self.app.wallet.remove_payment_request(obj.address, self.app.electrum_config)
+            self.update()
+        d = Question(_('Delete request?'), cb)
+        d.open()
 
 
-class CSpinner(Factory.Spinner):
-    '''CustomDropDown that allows fading out the dropdown
-    '''
-
-    def _update_dropdown(self, *largs):
-        dp = self._dropdown
-        cls = self.option_cls
-        if isinstance(cls, string_types):
-            cls = Factory.get(cls)
-        dp.clear_widgets()
-        def do_release(option):
-            Clock.schedule_once(lambda dt: dp.select(option.text), .25)
-        for value in self.values:
-            item = cls(text=value)
-            item.bind(on_release=do_release)
-            dp.add_widget(item)
 
 
 class TabbedCarousel(Factory.TabbedPanel):
@@ -473,7 +566,6 @@ class TabbedCarousel(Factory.TabbedPanel):
             scroll_x = 0
         else:
             scroll_x = 1. * (n - idx - 1) / (n - 1)
-
         mation = Factory.Animation(scroll_x=scroll_x, d=.25)
         mation.cancel_all(scrlv)
         mation.start(scrlv)
@@ -528,18 +620,3 @@ class TabbedCarousel(Factory.TabbedPanel):
             self.carousel.add_widget(widget)
             return
         super(TabbedCarousel, self).add_widget(widget, index=index)
-
-
-class ELTextInput(Factory.TextInput):
-    '''Custom TextInput used in main screens for numeric entry
-    '''
-
-    def insert_text(self, substring, from_undo=False):
-        if not from_undo:
-            if self.input_type == 'numbers':
-                numeric_list = map(str, range(10))
-                if '.' not in self.text:
-                    numeric_list.append('.')
-                if substring not in numeric_list:
-                    return
-        super(ELTextInput, self).insert_text(substring, from_undo=from_undo)

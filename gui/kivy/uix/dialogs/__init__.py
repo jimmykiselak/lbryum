@@ -7,7 +7,6 @@ from kivy.core.window import Window
 from lbryum.i18n import _
 
 
-
 class AnimatedPopup(Factory.Popup):
     ''' An Animated Popup that animates in and out.
     '''
@@ -182,6 +181,9 @@ class InfoBubble(Factory.Bubble):
                 App.get_running_app().stop()
                 import sys
                 sys.exit()
+            else:
+                App.get_running_app().is_exit = False
+
         if now:
             return on_stop()
 
@@ -189,3 +191,26 @@ class InfoBubble(Factory.Bubble):
         anim.bind(on_complete=on_stop)
         anim.cancel_all(self)
         anim.start(self)
+
+
+
+class OutputItem(Factory.BoxLayout):
+    pass
+
+class OutputList(Factory.GridLayout):
+
+    def __init__(self, **kwargs):
+        super(Factory.GridLayout, self).__init__(**kwargs)
+        self.app = App.get_running_app()
+
+    def update(self, outputs):
+        self.clear_widgets()
+        for (type, address, amount) in outputs:
+            self.add_output(address, amount)
+
+    def add_output(self, address, amount):
+        b = Factory.OutputItem()
+        b.address = address
+        b.value = self.app.format_amount_and_units(amount)
+        self.add_widget(b)
+

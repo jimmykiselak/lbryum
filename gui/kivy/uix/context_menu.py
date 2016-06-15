@@ -8,9 +8,12 @@ from kivy.lang import Builder
 from kivy.factory import Factory
 from kivy.clock import Clock
 
+from electrum_gui.kivy.i18n import _
+
 Builder.load_string('''
 <MenuItem@Button>
-    background_color: .2, .9, 1, 1
+    background_normal: ''
+    background_color: (0.192, .498, 0.745, 1)
     height: '48dp'
     size_hint: 1, None
 
@@ -25,6 +28,8 @@ Builder.load_string('''
     BoxLayout:
         size_hint: 1, 1
         height: '48dp'
+        padding: '12dp', '0dp'
+        spacing: '3dp'
         orientation: 'horizontal'
         id: buttons
 ''')
@@ -40,7 +45,7 @@ class ContextMenu(Bubble):
         self.obj = obj
         for k, v in action_list:
             l = MenuItem()
-            l.text = k
+            l.text = _(k)
             def func(f=v):
                 Clock.schedule_once(lambda dt: self.hide(), 0.1)
                 Clock.schedule_once(lambda dt: f(obj), 0.15)

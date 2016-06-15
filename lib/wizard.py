@@ -3,23 +3,30 @@
 # Electrum - lightweight Bitcoin client
 # Copyright (C) 2015 thomasv@gitorious, kyuupichan@gmail
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+# Permission is hereby granted, free of charge, to any person
+# obtaining a copy of this software and associated documentation files
+# (the "Software"), to deal in the Software without restriction,
+# including without limitation the rights to use, copy, modify, merge,
+# publish, distribute, sublicense, and/or sell copies of the Software,
+# and to permit persons to whom the Software is furnished to do so,
+# subject to the following conditions:
 #
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-# GNU General Public License for more details.
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
 #
-# You should have received a copy of the GNU General Public License
-# along with this program. If not, see <http://www.gnu.org/licenses/>.
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+# BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+# ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+# CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
 
 from lbryum import WalletStorage
 from lbryum.plugins import run_hook
 from util import PrintError
-from wallet import Wallet, wallet_types
+from wallet import Wallet
 from i18n import _
 
 MSG_GENERATING_WAIT = _("Electrum is generating your addresses, please wait...")
@@ -35,9 +42,6 @@ MSG_RESTORE_PASSPHRASE = \
     _("Please enter the passphrase you used when creating your %s wallet.  "
       "Note this is NOT a password.  Enter nothing if you did not use "
       "one or are unsure.")
-
-class UserCancelled(Exception):
-    pass
 
 class WizardBase(PrintError):
     '''Base class for gui-specific install wizards.'''
@@ -94,9 +98,9 @@ class WizardBase(PrintError):
         True on success."""
         raise NotImplementedError
 
-    def request_passphrase(self, device_text, restore=True):
-        """Request a passphrase for a wallet from the given device and
-        confirm it.  restore is True if restoring a wallet.  Should return
+    def request_passphrase(self, device_text):
+        """When restoring a wallet, request the passphrase that was used for
+        the wallet on the given device and confirm it.  Should return
         a unicode string."""
         raise NotImplementedError
 
@@ -143,6 +147,20 @@ class WizardBase(PrintError):
             wallet = Wallet(storage)
             if wallet.imported_keys:
                 self.update_wallet_format(wallet)
+            action = wallet.get_action()
+            if action != 'new':
+                self.hide()
+                path = storage.path
+                msg = _("The file '%s' contains an incompletely created wallet.\n"
+                        "Do you want to complete its creation now?") % path
+                if not self.question(msg):
+                    if self.question(_("Do you want to delete '%s'?") % path):
+                        import os
+                        os.remove(path)
+                        self.show_warning(_('The file was removed'))
+                        return
+                    return
+                self.show()
         else:
             cr, wallet = self.create_or_restore(storage)
             if not wallet:
@@ -201,23 +219,24 @@ class WizardBase(PrintError):
         self.remove_from_recently_open(storage.path)
 
         # Filter out any unregistered wallet kinds
-        registered_kinds = zip(*wallet_types)[0]
+        registered_kinds = Wallet.categories()
         kinds, descriptions = zip(*[pair for pair in WizardBase.wallet_kinds
                                     if pair[0] in registered_kinds])
         action, kind_index = self.query_create_or_restore(descriptions)
-
         assert action in WizardBase.user_actions
-
         kind = kinds[kind_index]
         if kind == 'multisig':
             wallet_type = self.query_multisig(action)
         elif kind == 'hardware':
-            # The create/restore distinction is not obvious for hardware
-            # wallets; so we ask for the action again and default based
-            # on the prior choice :)
             hw_wallet_types, choices = self.plugins.hardware_wallets(action)
-            msg = _('Select the type of hardware wallet: ')
-            action, choice = self.query_hw_wallet_choice(msg, action, choices)
+            if choices:
+                msg = _('Select the type of hardware wallet: ')
+            else:
+                msg = ' '.join([
+                    _('No hardware wallet support found on your system.'),
+                    _('Please install the relevant libraries (eg python-trezor for Trezor).'),
+                ])
+            choice = self.query_hw_wallet_choice(msg, choices)
             wallet_type = hw_wallet_types[choice]
         elif kind == 'twofactor':
             wallet_type = '2fa'

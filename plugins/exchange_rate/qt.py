@@ -1,3 +1,4 @@
+import time
 from PyQt4.QtGui import *
 from PyQt4.QtCore import *
 from lbryum_gui.qt.util import *
@@ -10,6 +11,7 @@ from decimal import Decimal
 from functools import partial
 from lbryum.plugins import hook
 from exchange_rate import FxPlugin
+from electrum.util import timestamp_to_datetime
 
 class Plugin(FxPlugin, QObject):
 
@@ -20,6 +22,8 @@ class Plugin(FxPlugin, QObject):
     def connect_fields(self, window, btc_e, fiat_e, fee_e):
 
         def edit_changed(edit):
+            if edit.follows:
+                return
             edit.setStyleSheet(BLACK_FG)
             fiat_e.is_last_edited = (edit == fiat_e)
             amount = edit.get_amount()
@@ -33,17 +37,29 @@ class Plugin(FxPlugin, QObject):
                     fiat_e.setText("")
             else:
                 if edit is fiat_e:
+                    btc_e.follows = True
                     btc_e.setAmount(int(amount / Decimal(rate) * COIN))
-                    if fee_e: window.update_fee()
                     btc_e.setStyleSheet(BLUE_FG)
+                    btc_e.follows = False
+                    if fee_e:
+                        window.update_fee()
                 else:
+                    fiat_e.follows = True
                     fiat_e.setText(self.ccy_amount_str(
                         amount * Decimal(rate) / COIN, False))
                     fiat_e.setStyleSheet(BLUE_FG)
+                    fiat_e.follows = False
 
-        fiat_e.textEdited.connect(partial(edit_changed, fiat_e))
-        btc_e.textEdited.connect(partial(edit_changed, btc_e))
+        btc_e.follows = False
+        fiat_e.follows = False
+        fiat_e.textChanged.connect(partial(edit_changed, fiat_e))
+        btc_e.textChanged.connect(partial(edit_changed, btc_e))
         fiat_e.is_last_edited = False
+
+    @hook
+    def init_qt(self, gui):
+        for window in gui.windows:
+            self.on_new_window(window)
 
     @hook
     def do_clear(self, window):
@@ -86,7 +102,6 @@ class Plugin(FxPlugin, QObject):
         ccy = str(self.ccy_combo.currentText())
         if ccy and ccy != self.ccy:
             self.set_currency(ccy)
-            self.emit(SIGNAL('new_fx_quotes'))
             self.hist_checkbox_update()
 
     def hist_checkbox_update(self):
@@ -108,16 +123,20 @@ class Plugin(FxPlugin, QObject):
     @hook
     def on_new_window(self, window):
         # Additional send and receive edit boxes
-        send_e = AmountEdit(self.get_currency)
-        window.send_grid.addWidget(send_e, 4, 2, Qt.AlignLeft)
-        window.amount_e.frozen.connect(
-            lambda: send_e.setFrozen(window.amount_e.isReadOnly()))
-        receive_e = AmountEdit(self.get_currency)
-        window.receive_grid.addWidget(receive_e, 2, 2, Qt.AlignLeft)
-        window.fiat_send_e = send_e
-        window.fiat_receive_e = receive_e
-        self.connect_fields(window, window.amount_e, send_e, window.fee_e)
-        self.connect_fields(window, window.receive_amount_e, receive_e, None)
+        if not hasattr(window, 'fiat_send_e'):
+            send_e = AmountEdit(self.get_currency)
+            window.send_grid.addWidget(send_e, 4, 2, Qt.AlignLeft)
+            window.amount_e.frozen.connect(
+                lambda: send_e.setFrozen(window.amount_e.isReadOnly()))
+            receive_e = AmountEdit(self.get_currency)
+            window.receive_grid.addWidget(receive_e, 2, 2, Qt.AlignLeft)
+            window.fiat_send_e = send_e
+            window.fiat_receive_e = receive_e
+            self.connect_fields(window, window.amount_e, send_e, window.fee_e)
+            self.connect_fields(window, window.receive_amount_e, receive_e, None)
+        else:
+            window.fiat_send_e.show()
+            window.fiat_receive_e.show()
         window.history_list.refresh_headers()
         window.update_status()
         window.connect(self, SIGNAL('new_fx_quotes'), lambda: self.on_fx_quotes(window))
@@ -177,3 +196,32 @@ class Plugin(FxPlugin, QObject):
         layout.addWidget(ok_button,3,1)
 
         return d.exec_()
+
+
+    def config_history(self):
+        return self.config.get('history_rates', 'unchecked') != 'unchecked'
+
+    def show_history(self):
+        return self.config_history() and self.ccy in self.exchange.history_ccys()
+
+    @hook
+    def history_tab_headers(self, headers):
+        if self.show_history():
+            headers.extend(['%s '%self.ccy + _('Amount'), '%s '%self.ccy + _('Balance')])
+
+    @hook
+    def history_tab_update_begin(self):
+        self.history_used_spot = False
+
+    @hook
+    def history_tab_update(self, tx, entry):
+        if not self.show_history():
+            return
+        tx_hash, height, conf, timestamp, value, balance = tx
+        if conf <= 0:
+            date = timestamp_to_datetime(time.time())
+        else:
+            date = timestamp_to_datetime(timestamp)
+        for amount in [value, balance]:
+            text = self.historical_value_str(amount, date)
+            entry.append(text)

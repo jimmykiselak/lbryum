@@ -12,9 +12,9 @@ import sys, getpass, datetime
 
 class ElectrumGui:
 
-    def __init__(self, config, network, daemon, plugins):
-        self.network = network
+    def __init__(self, config, daemon, plugins):
         self.config = config
+        self.network = daemon.network
         storage = WalletStorage(config.get_wallet_path())
         if not storage.file_exists:
             print "Wallet not found. try 'electrum create'"
@@ -31,10 +31,10 @@ class ElectrumGui:
         self.str_fee = ""
 
         self.wallet = Wallet(storage)
-        self.wallet.start_threads(network)
+        self.wallet.start_threads(self.network)
         self.contacts = StoreDict(self.config, 'contacts')
 
-        network.register_callback(self.on_network, ['updated', 'banner'])
+        self.network.register_callback(self.on_network, ['updated', 'banner'])
         self.commands = [_("[h] - displays this help text"), \
                          _("[i] - display transaction history"), \
                          _("[o] - enter payment order"), \
@@ -94,7 +94,7 @@ class ElectrumGui:
                 except Exception:
                     time_str = "unknown"
             else:
-                time_str = 'pending'
+                time_str = 'unconfirmed'
 
             label = self.wallet.get_label(tx_hash)
             messages.append( format_str%( time_str, label, format_satoshis(value, whitespaces=True), format_satoshis(balance, whitespaces=True) ) )
@@ -195,10 +195,8 @@ class ElectrumGui:
         if self.str_description:
             self.wallet.labels[tx.hash()] = self.str_description
 
-        h = self.wallet.send_tx(tx)
         print(_("Please wait..."))
-        self.wallet.tx_event.wait()
-        status, msg = self.wallet.receive_tx( h, tx )
+        status, msg = self.network.broadcast(tx)
 
         if status:
             print(_('Payment sent.'))

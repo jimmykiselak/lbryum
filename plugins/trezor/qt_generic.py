@@ -15,6 +15,7 @@ from lbryum.util import PrintError
 from lbryum.wallet import Wallet, BIP44_Wallet
 from lbryum.wizard import UserCancelled
 
+
 PASSPHRASE_HELP_SHORT =_(
     "Passphrases allow you to access new wallets, each "
     "hidden behind a particular case-sensitive passphrase.")
@@ -23,6 +24,9 @@ PASSPHRASE_HELP = PASSPHRASE_HELP_SHORT + "  " + _(
     "you use as they each generate different addresses.  Changing "
     "your passphrase does not lose other wallets, each is still "
     "accessible behind its own passphrase.")
+RECOMMEND_PIN = _(
+    "You should enable PIN protection.  Your PIN is the only protection "
+    "for your bitcoins if your device is lost or stolen.")
 PASSPHRASE_NOT_PIN = _(
     "If you forget a passphrase you will be unable to access any "
     "bitcoins in the wallet behind it.  A passphrase is not a PIN. "
@@ -126,53 +130,17 @@ class CharacterDialog(WindowModalDialog):
         if self.loop.exec_():
             self.data = None  # User cancelled
 
-# By far the trickiest thing about this handler is the window stack;
-# MacOSX is very fussy the modal dialogs are perfectly parented
-class QtHandler(QObject, PrintError):
-    '''An interface between the GUI (here, QT) and the device handling
-    logic for handling I/O.  This is a generic implementation of the
-    Trezor protocol; derived classes can customize it.'''
+
+class QtHandler(QtHandlerBase):
 
     charSig = pyqtSignal(object)
-    qcSig = pyqtSignal(object, object)
 
     def __init__(self, win, pin_matrix_widget_class, device):
-        super(QtHandler, self).__init__()
-        win.connect(win, SIGNAL('clear_dialog'), self.clear_dialog)
-        win.connect(win, SIGNAL('error_dialog'), self.error_dialog)
-        win.connect(win, SIGNAL('message_dialog'), self.message_dialog)
+        super(QtHandler, self).__init__(win, device)
         win.connect(win, SIGNAL('pin_dialog'), self.pin_dialog)
-        win.connect(win, SIGNAL('passphrase_dialog'), self.passphrase_dialog)
-        win.connect(win, SIGNAL('word_dialog'), self.word_dialog)
         self.charSig.connect(self.update_character_dialog)
-        self.qcSig.connect(self.win_query_choice)
-        self.win = win
         self.pin_matrix_widget_class = pin_matrix_widget_class
-        self.device = device
-        self.dialog = None
-        self.done = threading.Event()
         self.character_dialog = None
-
-    def top_level_window(self):
-        return self.win.top_level_window()
-
-    def watching_only_changed(self):
-        self.win.emit(SIGNAL('watching_only_changed'))
-
-    def query_choice(self, msg, labels):
-        self.done.clear()
-        self.qcSig.emit(msg, labels)
-        self.done.wait()
-        return self.choice
-
-    def show_message(self, msg, on_cancel=None):
-        self.win.emit(SIGNAL('message_dialog'), msg, on_cancel)
-
-    def show_error(self, msg):
-        self.win.emit(SIGNAL('error_dialog'), msg)
-
-    def finished(self):
-        self.win.emit(SIGNAL('clear_dialog'))
 
     def get_char(self, msg):
         self.done.clear()
@@ -190,18 +158,6 @@ class QtHandler(QObject, PrintError):
         self.done.wait()
         return self.response
 
-    def get_word(self, msg):
-        self.done.clear()
-        self.win.emit(SIGNAL('word_dialog'), msg)
-        self.done.wait()
-        return self.word
-
-    def get_passphrase(self, msg):
-        self.done.clear()
-        self.win.emit(SIGNAL('passphrase_dialog'), msg)
-        self.done.wait()
-        return self.passphrase
-
     def pin_dialog(self, msg):
         # Needed e.g. when resetting a device
         self.clear_dialog()
@@ -216,56 +172,10 @@ class QtHandler(QObject, PrintError):
         self.response = str(matrix.get_value())
         self.done.set()
 
-    def passphrase_dialog(self, msg):
-        d = PasswordDialog(self.top_level_window(), None, msg, PW_PASSPHRASE)
-        confirmed, p, passphrase = d.run()
-        if confirmed:
-            passphrase = BIP44_Wallet.normalize_passphrase(passphrase)
-        self.passphrase = passphrase
-        self.done.set()
-
-    def word_dialog(self, msg):
-        dialog = WindowModalDialog(self.top_level_window(), "")
-        hbox = QHBoxLayout(dialog)
-        hbox.addWidget(QLabel(msg))
-        text = QLineEdit()
-        text.setMaximumWidth(100)
-        text.returnPressed.connect(dialog.accept)
-        hbox.addWidget(text)
-        hbox.addStretch(1)
-        dialog.exec_()  # Firmware cannot handle cancellation
-        self.word = unicode(text.text())
-        self.done.set()
-
     def update_character_dialog(self, msg):
         if not self.character_dialog:
             self.character_dialog = CharacterDialog(self.top_level_window())
         self.character_dialog.get_char(msg.word_pos, msg.character_pos)
-        self.done.set()
-
-    def message_dialog(self, msg, on_cancel):
-        # Called more than once during signing, to confirm output and fee
-        self.clear_dialog()
-        title = _('Please check your %s device') % self.device
-        self.dialog = dialog = WindowModalDialog(self.top_level_window(), title)
-        l = QLabel(msg)
-        vbox = QVBoxLayout(dialog)
-        vbox.addWidget(l)
-        if on_cancel:
-            dialog.rejected.connect(on_cancel)
-            vbox.addLayout(Buttons(CancelButton(dialog)))
-        dialog.show()
-
-    def error_dialog(self, msg):
-        self.win.show_error(msg, parent=self.top_level_window())
-
-    def clear_dialog(self):
-        if self.dialog:
-            self.dialog.accept()
-            self.dialog = None
-
-    def win_query_choice(self, msg, labels):
-        self.choice = self.win.query_choice(msg, labels)
         self.done.set()
 
     def request_trezor_init_settings(self, method, device):
@@ -274,30 +184,33 @@ class QtHandler(QObject, PrintError):
         vbox = QVBoxLayout()
         next_enabled=True
 
+        label = QLabel(_("Enter a label to name your device:"))
+        name = QLineEdit()
+        hl = QHBoxLayout()
+        hl.addWidget(label)
+        hl.addWidget(name)
+        hl.addStretch(1)
+        vbox.addLayout(hl)
+
         def clean_text(widget):
             text = unicode(widget.toPlainText()).strip()
             return ' '.join(text.split())
 
         if method in [TIM_NEW, TIM_RECOVER]:
             gb = QGroupBox()
-            vbox1 = QVBoxLayout()
-            gb.setLayout(vbox1)
+            hbox1 = QHBoxLayout()
+            gb.setLayout(hbox1)
             # KeepKey recovery doesn't need a word count
-            if method == TIM_NEW or self.device == 'Trezor':
+            if method == TIM_NEW or self.device == 'TREZOR':
                 vbox.addWidget(gb)
             gb.setTitle(_("Select your seed length:"))
-            choices = [
-                _("12 words"),
-                _("18 words"),
-                _("24 words"),
-            ]
             bg = QButtonGroup()
-            for i, choice in enumerate(choices):
+            for i, count in enumerate([12, 18, 24]):
                 rb = QRadioButton(gb)
-                rb.setText(choice)
+                rb.setText(_("%d words") % count)
                 bg.addButton(rb)
                 bg.setId(rb, i)
-                vbox1.addWidget(rb)
+                hbox1.addWidget(rb)
                 rb.setChecked(True)
             cb_pin = QCheckBox(_('Enable PIN protection'))
             cb_pin.setChecked(True)
@@ -323,15 +236,8 @@ class QtHandler(QObject, PrintError):
             hbox_pin.addWidget(pin)
             hbox_pin.addStretch(1)
 
-        label = QLabel(_("Enter a label to name your device:"))
-        name = QLineEdit()
-        hl = QHBoxLayout()
-        hl.addWidget(label)
-        hl.addWidget(name)
-        hl.addStretch(1)
-        vbox.addLayout(hl)
-
         if method in [TIM_NEW, TIM_RECOVER]:
+            vbox.addWidget(WWLabel(RECOMMEND_PIN))
             vbox.addWidget(cb_pin)
         else:
             vbox.addLayout(hbox_pin)
@@ -411,10 +317,7 @@ def qt_plugin_class(base_plugin_class):
         device_id = self.device_manager().wallet_id(window.wallet)
         if not device_id:
             info = self.device_manager().select_device(window.wallet, self)
-            if info:
-                device_id = info.device.id_
-            else:
-                window.wallet.handler.show_error(_("No devices found"))
+            device_id = info.device.id_
         return device_id
 
     def query_choice(self, window, msg, choices):
@@ -443,12 +346,12 @@ class SettingsDialog(WindowModalDialog):
         self.setMaximumWidth(540)
 
         devmgr = plugin.device_manager()
+        config = devmgr.config
         handler = window.wallet.handler
         thread = window.wallet.thread
         # wallet can be None, needn't be window.wallet
         wallet = devmgr.wallet_by_id(device_id)
         hs_rows, hs_cols = (64, 128)
-        self.current_label=None
 
         def invoke_client(method, *args, **kw_args):
             unpair_after = kw_args.pop('unpair_after', False)
@@ -466,7 +369,7 @@ class SettingsDialog(WindowModalDialog):
             thread.add(task, on_success=update)
 
         def update(features):
-            self.current_label = features.label
+            self.features = features
             set_label_enabled()
             bl_hash = features.bootloader_hash.encode('hex')
             bl_hash = "\n".join([bl_hash[:32], bl_hash[32:]])
@@ -497,23 +400,30 @@ class SettingsDialog(WindowModalDialog):
             language_label.setText(features.language)
 
         def set_label_enabled():
-            label_apply.setEnabled(label_edit.text() != self.current_label)
+            label_apply.setEnabled(label_edit.text() != self.features.label)
 
         def rename():
             invoke_client('change_label', unicode(label_edit.text()))
 
         def toggle_passphrase():
             title = _("Confirm Toggle Passphrase Protection")
-            msg = _("This will cause your Electrum wallet to be unpaired "
-                    "unless your passphrase was or will be empty.\n\n"
-                    "This is because addresses will no "
-                    "longer correspond to those used by your %s.\n\n"
-                    "You will need to create a new Electrum wallet "
-                    "with the install wizard so that they match.\n\n"
-                    "Are you sure you want to proceed?") % plugin.device
+            currently_enabled = self.features.passphrase_protection
+            if currently_enabled:
+                msg = _("After disabling passphrases, you can only pair this "
+                        "Electrum wallet if it had an empty passphrase.  "
+                        "If its passphrase was not empty, you will need to "
+                        "create a new wallet with the install wizard.  You "
+                        "can use this wallet again at any time by re-enabling "
+                        "passphrases and entering its passphrase.")
+            else:
+                msg = _("Your current Electrum wallet can only be used with "
+                        "an empty passphrase.  You must create a separate "
+                        "wallet with the install wizard for other passphrases "
+                        "as each one generates a new set of addresses.")
+            msg += "\n\n" + _("Are you sure you want to proceed?")
             if not self.question(msg, title=title):
                 return
-            invoke_client('toggle_passphrase', unpair_after=True)
+            invoke_client('toggle_passphrase', unpair_after=currently_enabled)
 
         def change_homescreen():
             from PIL import Image  # FIXME
@@ -557,8 +467,7 @@ class SettingsDialog(WindowModalDialog):
             timeout_minutes.setText(_("%2d minutes") % mins)
 
         def slider_released():
-            seconds = timeout_slider.sliderPosition() * 60
-            wallet.set_session_timeout(seconds)
+            config.set_session_timeout(timeout_slider.sliderPosition() * 60)
 
         # Information tab
         info_tab = QWidget()
@@ -647,29 +556,28 @@ class SettingsDialog(WindowModalDialog):
             settings_glayout.addWidget(homescreen_msg, 5, 1, 1, -1)
 
         # Settings tab - Session Timeout
-        if wallet:
-            timeout_label = QLabel(_("Session Timeout"))
-            timeout_minutes = QLabel()
-            timeout_slider = QSlider(Qt.Horizontal)
-            timeout_slider.setRange(1, 60)
-            timeout_slider.setSingleStep(1)
-            timeout_slider.setTickInterval(5)
-            timeout_slider.setTickPosition(QSlider.TicksBelow)
-            timeout_slider.setTracking(True)
-            timeout_msg = QLabel(
-                _("Clear the session after the specified period "
-                  "of inactivity.  Once a session has timed out, "
-                  "your PIN and passphrase (if enabled) must be "
-                  "re-entered to use the device."))
-            timeout_msg.setWordWrap(True)
-            timeout_slider.setSliderPosition(wallet.session_timeout // 60)
-            slider_moved()
-            timeout_slider.valueChanged.connect(slider_moved)
-            timeout_slider.sliderReleased.connect(slider_released)
-            settings_glayout.addWidget(timeout_label, 6, 0)
-            settings_glayout.addWidget(timeout_slider, 6, 1, 1, 3)
-            settings_glayout.addWidget(timeout_minutes, 6, 4)
-            settings_glayout.addWidget(timeout_msg, 7, 1, 1, -1)
+        timeout_label = QLabel(_("Session Timeout"))
+        timeout_minutes = QLabel()
+        timeout_slider = QSlider(Qt.Horizontal)
+        timeout_slider.setRange(1, 60)
+        timeout_slider.setSingleStep(1)
+        timeout_slider.setTickInterval(5)
+        timeout_slider.setTickPosition(QSlider.TicksBelow)
+        timeout_slider.setTracking(True)
+        timeout_msg = QLabel(
+            _("Clear the session after the specified period "
+              "of inactivity.  Once a session has timed out, "
+              "your PIN and passphrase (if enabled) must be "
+              "re-entered to use the device."))
+        timeout_msg.setWordWrap(True)
+        timeout_slider.setSliderPosition(config.get_session_timeout() // 60)
+        slider_moved()
+        timeout_slider.valueChanged.connect(slider_moved)
+        timeout_slider.sliderReleased.connect(slider_released)
+        settings_glayout.addWidget(timeout_label, 6, 0)
+        settings_glayout.addWidget(timeout_slider, 6, 1, 1, 3)
+        settings_glayout.addWidget(timeout_minutes, 6, 4)
+        settings_glayout.addWidget(timeout_msg, 7, 1, 1, -1)
         settings_layout.addLayout(settings_glayout)
         settings_layout.addStretch(1)
 

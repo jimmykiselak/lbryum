@@ -1,11 +1,52 @@
 #:import Clock kivy.clock.Clock
 #:import Window kivy.core.window.Window
 #:import Factory kivy.factory.Factory
-#:import _ electrum.i18n._
+#:import _ electrum_gui.kivy.i18n._
 
-# Custom Global Widgets
+
+###########################
+#     Global Defaults
+###########################
+
+<Label>
+    markup: True
+    font_name: 'Roboto'
+    font_size: '16sp'
+    bound: False
+    on_text: if isinstance(self.text, _) and not self.bound: self.bound=True; _.bind(self)
+
+<TextInput>
+    on_focus: app._focused_widget = root
+
 <Button>
     on_parent: self.MIN_STATE_TIME = 0.1
+
+<ListItemButton>
+    font_size: '12sp'
+
+<Carousel>:
+    canvas.before:
+        Color:
+            rgba: 0.1, 0.1, 0.1, 1
+        Rectangle:
+            size: self.size
+            pos: self.pos
+
+<ActionView>:
+    canvas.before:
+        Color:
+            rgba: 0.1, 0.1, 0.1, 1
+        Rectangle:
+            size: self.size
+            pos: self.pos
+
+
+# Custom Global Widgets
+
+<TopLabel@Label>
+    size_hint_y: None
+    text_size: self.width, None
+    height: self.texture_size[1]
 
 <EmptyLabel@Label>
     color: (0.8, 0.8, 0.8, 1)
@@ -19,45 +60,92 @@
     height: self.minimum_height
 
 
-<IconButton@ButtonBehavior+Image>
-    allow_stretch: True
-    size_hint_x: None
-    width: self.height
-    canvas:
-        BorderImage:
-            border: (10, 10, 10, 10)
-            source:
-                'atlas://gui/kivy/theming/light/' + ('tab_btn'\
-                if root.state == 'normal' else 'icon_border')
-            size: root.size
-            pos: root.pos
+
+<IconButton@Button>:
+    icon: ''
+    AnchorLayout:
+        pos: self.parent.pos
+        size: self.parent.size
+        orientation: 'lr-tb'
+        Image:
+            source: self.parent.parent.icon
+            size_hint_x: None
+            size: '30dp', '30dp'
 
 
-<ELTextInput>
-    padding: '10dp', '4dp'
-    background_color: (0.238, 0.589, .996, 1) if self.focus else self.foreground_color
-    foreground_color: 0.531, 0.531, 0.531, 1
-    background_active: 'atlas://gui/kivy/theming/light/textinput_active'
-    background_normal: 'atlas://gui/kivy/theming/light/textinput_active'
-
-
-###########################
-#     Global Defaults
-###########################
-<TextInput>
-    on_focus: app._focused_widget = root
-
-<Label>
-    markup: True
-    font_name: 'Roboto'
-    font_size: '16sp'
-
-<ListItemButton>
-    font_size: '12sp'
 
 #########################
 #       Dialogs
 #########################
+<BoxLabel@BoxLayout>
+    text: ''
+    value: ''
+    size_hint_y: None
+    height: max(lbl1.height, lbl2.height)
+    TopLabel
+        id: lbl1
+        text: root.text
+        pos_hint: {'top':1}
+    TopLabel
+        id: lbl2
+        text: root.value
+
+<OutputItem>
+    address: ''
+    value: ''
+    size_hint_y: None
+    height: max(lbl1.height, lbl2.height)
+    TopLabel
+        id: lbl1
+        text: '[ref=%s]%s[/ref]'%(root.address, root.address)
+        font_size: '6pt'
+        shorten: True
+        size_hint_x: 0.65
+        on_ref_press:
+            app._clipboard.copy(root.address)
+            app.show_info(_('Address copied to clipboard') + ' ' + root.address)
+    TopLabel
+        id: lbl2
+        text: root.value
+        font_size: '6pt'
+        size_hint_x: 0.35
+        halign: 'right'
+
+
+<OutputList>
+    height: self.minimum_height
+    size_hint_y: None
+    cols: 1
+    spacing: '10dp'
+    padding: '10dp'
+    canvas.before:
+        Color:
+            rgb: .3, .3, .3
+        Rectangle:
+            size: self.size
+            pos: self.pos
+
+<RefLabel@TopLabel>
+    font_size: '6pt'
+    name: ''
+    data: ''
+    text: self.data
+    touched: False
+    padding: '10dp', '10dp'
+    on_touch_down:
+        touch = args[1]
+        if self.collide_point(*touch.pos): app.on_ref_label(self, touch)
+        else: self.touched = False
+    canvas.before:
+        Color:
+            rgb: .3, .3, .3
+        Rectangle:
+            size: self.size
+            pos: self.pos
+
+<TxHashLabel@RefLabel>
+    data: ''
+    text: ' '.join(map(''.join, zip(*[iter(self.data)]*4))) if self.data else ''
 
 <InfoBubble>
     size_hint: None, None
@@ -89,19 +177,18 @@
 
 
 <SendReceiveBlueBottom@GridLayout>
-    canvas.before:
-        Color:
-            rgba: .238, .585, .878, 1
-        BorderImage:
-            border: 9, 9, 9, 9
-            source: 'atlas://gui/kivy/theming/light/card_bottom'
-            size: self.size
-            pos: self.pos
-
     item_height: dp(42)
     foreground_color: .843, .914, .972, 1
     cols: 1
     padding: '12dp', 0
+    canvas.before:
+        Color:
+            rgba: 0.192, .498, 0.745, 1
+        BorderImage:
+            source: 'atlas://gui/kivy/theming/light/card_bottom'
+            size: self.size
+            pos: self.pos
+
 
 
 <CardSeparator@Widget>
@@ -132,7 +219,7 @@
             pos: self.pos
 
 <BlueButton@Button>:
-    background_color: .238, .585, .878, 0
+    background_color: 1, .585, .878, 0
     halign: 'left'
     text_size: (self.width-10, None)
     size_hint: 0.5, None
@@ -141,26 +228,14 @@
     padding: '5dp', '5db'
     height: '40dp'
     text_color: self.foreground_color
-    foreground_color: 1, 0, 0, 1
+    disabled_color: 1, 1, 1, 1
+    foreground_color: 1, 1, 1, 1
     canvas.before:
         Color:
             rgba: (0.9, .498, 0.745, 1) if self.state == 'down' else self.background_color
         Rectangle:
             size: self.size
             pos: self.pos
-
-
-<TextInputBlue@TextInput>
-    padding: '5dp'
-    size_hint: 1, None
-    height: '27dp'
-    pos_hint: {'center_y':.5}
-    multiline: False
-    hint_text_color: self.foreground_color
-    foreground_color: 1, 1, 1, 1
-    font_size: '16dp'
-    background_normal: 'atlas://gui/kivy/theming/light/tab_btn'
-    background_active: 'atlas://gui/kivy/theming/light/textinput_active'
 
 
 <KButton@Button>:
@@ -170,6 +245,8 @@
         self.parent.update_amount(self.text)
 
 
+<StripLayout>
+    padding: 0, 0, 0, 0
 
 <TabbedPanelStrip>:
     on_parent:
@@ -182,7 +259,7 @@
     do_default_tab: False
     Carousel:
         scroll_timeout: 250
-        scroll_distance: '20dp'
+        scroll_distance: '100dp'
         anim_type: 'out_quart'
         min_move: .05
         anim_move_duration: .1
@@ -193,8 +270,7 @@
 
 
 <CleanHeader@TabbedPanelHeader>
-    #border: 0, 0, 16, 0
-    border: 0, 0, 16, 0
+    border: 16, 0, 16, 0
     markup: False
     text_size: self.size
     halign: 'center'
@@ -203,13 +279,6 @@
     font_size: '12.5sp'
     background_normal: 'atlas://gui/kivy/theming/light/tab_btn'
     background_down: 'atlas://gui/kivy/theming/light/tab_btn_pressed'
-    #canvas.before:
-    #    Color:
-    #        rgba: .6, .6, .6, .7
-    #    Rectangle:
-    #        size: self.size
-    #        pos: self.x + 1, self.y - 1
-    #        texture: self.texture
 
 
 <ColoredLabel@Label>:
@@ -229,7 +298,6 @@
         id: panel
         tab_height: '48dp'
         tab_width: panel.width/3
-        default_tab: history_tab
         strip_border: 0, 0, 0, 0
         InvoicesScreen:
             id: invoices_screen
@@ -246,9 +314,6 @@
         RequestsScreen:
             id: requests_screen
             tab: requests_tab
-        #ContactsScreen:
-        #    id: contacts_screen
-        #    tab: contacts_tab
         CleanHeader:
             id: invoices_tab
             text: _('Invoices')
@@ -269,10 +334,7 @@
             id: requests_tab
             text: _('Requests')
             slide: 4
-        #CleanHeader:
-        #    id: contacts_tab
-        #    text: _('Contacts')
-        #    slide: 4
+
 
 <ActionOvrButton@ActionButton>
     on_release:
@@ -304,12 +366,9 @@ BoxLayout:
                 id: action_status
                 important: True
                 size_hint: 1, 1
-                markup: True
-                mipmap: True
                 bold: True
-                markup: True
-                color: 1, 1, 1, 1
-                text: "[color=#777777]"+app.status+"[/color]"
+                color: 0.7, 0.7, 0.7, 1
+                text: app.status
                 font_size: '22dp'
                 minimum_width: '1dp'
                 on_release: app.popup_dialog('status')
@@ -320,18 +379,15 @@ BoxLayout:
                     name: 'about'
                     text: _('About')
                 ActionOvrButton:
-                    name: 'network'
-                    text: _('Network')
-                    on_parent:
-                        # when widget overflow drop down is shown, adjust the width
-                        parent = args[1]
-                        if parent: ao._dropdown.width = sp(200)
-                ActionOvrButton:
                     name: 'wallets'
                     text: _('Wallets')
                 ActionOvrButton:
                     name: 'settings'
                     text: _('Settings')
+                    on_parent:
+                        # when widget overflow drop down is shown, adjust the width
+                        parent = args[1]
+                        if parent: ao._dropdown.width = sp(200)
     ScreenManager:
         id: manager
         ScreenTabs:

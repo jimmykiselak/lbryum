@@ -3,19 +3,27 @@
 # Electrum - lightweight Bitcoin client
 # Copyright (C) 2012 thomasv@gitorious
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+# Permission is hereby granted, free of charge, to any person
+# obtaining a copy of this software and associated documentation files
+# (the "Software"), to deal in the Software without restriction,
+# including without limitation the rights to use, copy, modify, merge,
+# publish, distribute, sublicense, and/or sell copies of the Software,
+# and to permit persons to whom the Software is furnished to do so,
+# subject to the following conditions:
 #
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-# GNU General Public License for more details.
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
 #
-# You should have received a copy of the GNU General Public License
-# along with this program. If not, see <http://www.gnu.org/licenses/>.
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+# BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+# ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+# CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
 
+import copy
 import datetime
 import json
 
@@ -44,8 +52,12 @@ class TxDialog(QDialog, MessageBoxMixin):
         '''Transactions in the wallet will show their description.
         Pass desc to give a description for txs not yet in the wallet.
         '''
-        QDialog.__init__(self, parent=None)   # Top-level window
-        self.tx = tx
+        # We want to be a top-level window
+        QDialog.__init__(self, parent=None)
+        # Take a copy; it might get updated in the main window by
+        # e.g. the FX plugin.  If this happens during or after a long
+        # sign operation the signatures are lost.
+        self.tx = copy.deepcopy(tx)
         self.tx.deserialize()
         self.main_window = parent
         self.wallet = parent.wallet
@@ -65,11 +77,10 @@ class TxDialog(QDialog, MessageBoxMixin):
         self.tx_hash_e.addButton(":icons/qrcode.png", qr_show, _("Show as QR code"))
         self.tx_hash_e.setReadOnly(True)
         vbox.addWidget(self.tx_hash_e)
-        self.status_label = QLabel()
-        vbox.addWidget(self.status_label)
-
         self.tx_desc = QLabel()
         vbox.addWidget(self.tx_desc)
+        self.status_label = QLabel()
+        vbox.addWidget(self.status_label)
         self.date_label = QLabel()
         vbox.addWidget(self.date_label)
         self.amount_label = QLabel()
@@ -132,7 +143,7 @@ class TxDialog(QDialog, MessageBoxMixin):
             dialogs.remove(self)
 
     def show_qr(self):
-        text = self.tx.raw.decode('hex')
+        text = str(self.tx).decode('hex')
         text = base_encode(text, base=43)
         try:
             self.main_window.show_qrcode(text, 'Transaction', parent=self)
@@ -164,39 +175,22 @@ class TxDialog(QDialog, MessageBoxMixin):
 
 
     def update(self):
-        is_relevant, is_mine, v, fee = self.wallet.get_wallet_delta(self.tx)
-        tx_hash = self.tx.hash()
         desc = self.desc
-        time_str = None
-        self.broadcast_button.hide()
+        base_unit = self.main_window.base_unit()
+        format_amount = self.main_window.format_amount
+        tx_hash, status, label, can_broadcast, can_rbf, amount, fee, height, conf, timestamp, exp_n = self.wallet.get_tx_info(self.tx)
 
-        if self.tx.is_complete():
-            status = _("Signed")
-
-            if tx_hash in self.wallet.transactions.keys():
-                desc = self.wallet.get_label(tx_hash)
-                conf, timestamp = self.wallet.get_confirmations(tx_hash)
-                if timestamp:
-                    time_str = datetime.datetime.fromtimestamp(timestamp).isoformat(' ')[:-3]
-                else:
-                    time_str = _('Pending')
-                status = _("%d confirmations")%conf
-            else:
-                self.broadcast_button.show()
-                # cannot broadcast when offline
-                if self.main_window.network is None:
-                    self.broadcast_button.setEnabled(False)
+        if can_broadcast:
+            self.broadcast_button.show()
         else:
-            s, r = self.tx.signature_count()
-            status = _("Unsigned") if s == 0 else _('Partially signed') + ' (%d/%d)'%(s,r)
-            tx_hash = _('Unknown');
+            self.broadcast_button.hide()
 
         if self.wallet.can_sign(self.tx):
             self.sign_button.show()
         else:
             self.sign_button.hide()
 
-        self.tx_hash_e.setText(tx_hash)
+        self.tx_hash_e.setText(tx_hash or _('Unknown'))
         if desc is None:
             self.tx_desc.hide()
         else:
@@ -204,32 +198,27 @@ class TxDialog(QDialog, MessageBoxMixin):
             self.tx_desc.show()
         self.status_label.setText(_('Status:') + ' ' + status)
 
-        if time_str is not None:
+        if timestamp:
+            time_str = datetime.datetime.fromtimestamp(timestamp).isoformat(' ')[:-3]
             self.date_label.setText(_("Date: %s")%time_str)
+            self.date_label.show()
+        elif exp_n:
+            self.date_label.setText(_('Expected confirmation time: %d blocks'%(exp_n)))
             self.date_label.show()
         else:
             self.date_label.hide()
-
         # if we are not synchronized, we cannot tell
         if not self.wallet.up_to_date:
             return
-
-        base_unit = self.main_window.base_unit()
-        format_amount = self.main_window.format_amount
-
-        if is_relevant:
-            if is_mine:
-                if fee is not None:
-                    self.amount_label.setText(_("Amount sent:")+' %s'% format_amount(-v+fee) + ' ' + base_unit)
-                    self.fee_label.setText(_("Transaction fee")+': %s'% format_amount(-fee) + ' ' + base_unit)
-                else:
-                    self.amount_label.setText(_("Amount sent:")+' %s'% format_amount(-v) + ' ' + base_unit)
-                    self.fee_label.setText(_("Transaction fee")+': '+ _("unknown"))
-            else:
-                self.amount_label.setText(_("Amount received:")+' %s'% format_amount(v) + ' ' + base_unit)
+        if amount is None:
+            amount_str = _("Transaction unrelated to your wallet")
+        elif amount > 0:
+            amount_str = _("Amount received:") + ' %s'% format_amount(amount) + ' ' + base_unit
         else:
-            self.amount_label.setText(_("Transaction unrelated to your wallet"))
-
+            amount_str = _("Amount sent:") + ' %s'% format_amount(-amount) + ' ' + base_unit
+        fee_str = _("Transaction fee") + ': %s'% (format_amount(fee) + ' ' + base_unit if fee is not None else _('unknown'))
+        self.amount_label.setText(amount_str)
+        self.fee_label.setText(fee_str)
         run_hook('transaction_dialog_update', self)
 
 

@@ -1,9 +1,11 @@
 import re
+import os
 import sys
 import time
 import datetime
 import traceback
 from decimal import Decimal
+import threading
 
 import lbryum
 from lbryum import WalletStorage, Wallet
@@ -24,7 +26,7 @@ from kivy.properties import (OptionProperty, AliasProperty, ObjectProperty,
 from kivy.cache import Cache
 from kivy.clock import Clock
 from kivy.factory import Factory
-from kivy.metrics import inch, metrics
+from kivy.metrics import inch
 from kivy.lang import Builder
 
 # lazy imports for factory so that widgets can be used in kv
@@ -56,6 +58,15 @@ from kivy.core.clipboard import Clipboard
 
 Factory.register('TabbedCarousel', module='lbryum_gui.kivy.uix.screens')
 
+# Register fonts without this you won't be able to use bold/italic...
+# inside markup.
+from kivy.core.text import Label
+Label.register('Roboto',
+               'gui/kivy/data/fonts/Roboto.ttf',
+               'gui/kivy/data/fonts/Roboto.ttf',
+               'gui/kivy/data/fonts/Roboto-Bold.ttf',
+               'gui/kivy/data/fonts/Roboto-Bold.ttf')
+
 
 from lbryum.util import base_units
 
@@ -64,14 +75,30 @@ class ElectrumWindow(App):
 
     electrum_config = ObjectProperty(None)
 
+    language = StringProperty('en')
+
+    def set_URI(self, uri):
+        self.switch_to('send')
+        self.send_screen.set_URI(uri)
+
+    def on_new_intent(self, intent):
+        if intent.getScheme() != 'bitcoin':
+            return
+        uri = intent.getDataString()
+        self.set_URI(uri)
+
+    def on_language(self, instance, language):
+        Logger.info('language: {}'.format(language))
+        _.switch_lang(language)
+
     def on_quotes(self, d):
-        print "main_window: on_quotes"
+        #Logger.info("on_quotes")
         pass
 
     def on_history(self, d):
-        print "main_window: on_history"
+        #Logger.info("on_history")
         if self.history_screen:
-            self.history_screen.update()
+            Clock.schedule_once(lambda dt: self.history_screen.update())
 
     def _get_bu(self):
         return self.electrum_config.get('base_unit', 'mBTC')
@@ -152,31 +179,20 @@ class ElectrumWindow(App):
     :data:`ui_mode` is a read only `AliasProperty` Defaults to 'phone'
     '''
 
-    url = StringProperty('', allownone=True)
-    '''
-    '''
-
-    wallet = ObjectProperty(None)
-    '''Holds the electrum wallet
-
-    :attr:`wallet` is a `ObjectProperty` defaults to None.
-    '''
-
     def __init__(self, **kwargs):
         # initialize variables
         self._clipboard = Clipboard
         self.info_bubble = None
-        self.qrscanner = None
         self.nfcscanner = None
         self.tabs = None
-
-        self.receive_address = None
-        self.current_invoice = None
+        self.is_exit = False
+        self.wallet = None
 
         super(ElectrumWindow, self).__init__(**kwargs)
 
         title = _('Electrum App')
         self.electrum_config = config = kwargs.get('config', None)
+        self.language = config.get('language', 'en')
         self.network = network = kwargs.get('network', None)
         self.plugins = kwargs.get('plugins', [])
 
@@ -186,31 +202,21 @@ class ElectrumWindow(App):
         self.contacts = Contacts(self.electrum_config)
         self.invoices = InvoiceStore(self.electrum_config)
 
-        self.bind(url=self.set_URI)
-        # were we sent a url?
-        url = self.electrum_config.get('url', None)
-        if url:
-            self.set_URI(url)
-
         # create triggers so as to minimize updation a max of 2 times a sec
         self._trigger_update_wallet =\
             Clock.create_trigger(self.update_wallet, .5)
         self._trigger_update_status =\
             Clock.create_trigger(self.update_status, .5)
-        self._trigger_notify_transactions = \
-            Clock.create_trigger(self.notify_transactions, 5)
+        # cached dialogs
+        self._settings_dialog = None
+        self._password_dialog = None
 
-    def get_receive_address(self):
-        return self.receive_address if self.receive_address else self.wallet.get_unused_address(None)
-
-    def do_pay(self, obj):
-        pr = self.invoices.get(obj.key)
-        self.on_pr(pr)
 
     def on_pr(self, pr):
         if pr.verify(self.contacts):
             key = self.invoices.add(pr)
-            self.invoices_screen.update()
+            if self.invoices_screen:
+                self.invoices_screen.update()
             status = self.invoices.get_status(key)
             if status == PR_PAID:
                 self.show_error("invoice already paid")
@@ -219,21 +225,33 @@ class ElectrumWindow(App):
                 if pr.has_expired():
                     self.show_error(_('Payment request has expired'))
                 else:
-                    self.current_invoice = pr
-                    self.update_tab('send')
                     self.switch_to('send')
+                    self.send_screen.set_request(pr)
         else:
             self.show_error("invoice error:" + pr.error)
             self.send_screen.do_clear()
 
-    def set_URI(self, url):
+    def on_qr(self, data):
+        from electrum.bitcoin import base_decode, is_address
+        if is_address(data):
+            self.set_URI(data)
+            return
+        if data.startswith('bitcoin:'):
+            self.set_URI(data)
+            return
+        # try to decode transaction
+        from lbryum.transaction import Transaction
         try:
             url = lbryum.util.parse_URI(url, self.on_pr)
+            text = base_decode(data, None, base=43).encode('hex')
+            tx = Transaction(text)
         except:
-            self.show_info("Invalid URI", url)
+            tx = None
+        if tx:
+            self.tx_dialog(tx)
             return
-        self.send_screen.set_URI(url)
-
+        # show error
+        self.show_error("Unable to decode QR data")
 
     def update_tab(self, name):
         s = getattr(self, name + '_screen', None)
@@ -246,15 +264,45 @@ class ElectrumWindow(App):
             self.update_tab(tab)
 
     def switch_to(self, name):
+        s = getattr(self, name + '_screen', None)
+        if self.send_screen is None:
+            s = self.tabs.ids[name + '_screen']
+            s.load_screen()
+        panel = self.tabs.ids.panel
         tab = self.tabs.ids[name + '_tab']
-        self.tabs.ids.panel.switch_to(tab)
+        panel.switch_to(tab)
 
     def show_request(self, addr):
-        self.receive_address = addr
-        self.update_tab('receive')
         self.switch_to('receive')
+        self.receive_screen.screen.address = addr
+
+    def show_pr_details(self, req, status, is_invoice):
+        from electrum.util import format_time
+        requestor = req.get('requestor')
+        exp = req.get('exp')
+        memo = req.get('memo')
+        amount = req.get('amount')
+        popup = Builder.load_file('gui/kivy/uix/ui_screens/invoice.kv')
+        popup.is_invoice = is_invoice
+        popup.amount = amount
+        popup.requestor = requestor if is_invoice else req.get('address')
+        popup.exp = format_time(exp) if exp else ''
+        popup.description = memo if memo else ''
+        popup.signature = req.get('signature', '')
+        popup.status = status
+        txid = req.get('txid')
+        popup.tx_hash = txid or ''
+        popup.on_open = lambda: popup.ids.output_list.update(req.get('outputs', []))
+        popup.open()
+
+    def qr_dialog(self, title, data, show_text=False):
+        from uix.dialogs.qr_dialog import QRDialog
+        popup = QRDialog(title, data, show_text)
+        popup.open()
 
     def scan_qr(self, on_complete):
+        if platform != 'android':
+            return
         from jnius import autoclass
         from android import activity
         PythonActivity = autoclass('org.renpy.android.PythonActivity')
@@ -267,9 +315,33 @@ class ElectrumWindow(App):
                     contents = intent.getStringExtra("SCAN_RESULT")
                     if intent.getStringExtra("SCAN_RESULT_FORMAT") == 'QR_CODE':
                         on_complete(contents)
+                    else:
+                        self.show_error("wrong format " + intent.getStringExtra("SCAN_RESULT_FORMAT"))
         activity.bind(on_activity_result=on_qr_result)
-        PythonActivity.mActivity.startActivityForResult(intent, 0)
+        try:
+            PythonActivity.mActivity.startActivityForResult(intent, 0)
+        except:
+            self.show_error(_('Could not start Barcode Scanner.') + ' ' + _('Please install the Barcode Scanner app from ZXing'))
 
+    def scan_qr_zxing(self, on_complete):
+        # uses zxing embedded lib
+        if platform != 'android':
+            return
+        from jnius import autoclass
+        from android import activity
+        PythonActivity = autoclass('org.renpy.android.PythonActivity')
+        IntentIntegrator = autoclass('com.google.zxing.integration.android.IntentIntegrator')
+        integrator = IntentIntegrator(PythonActivity.mActivity)
+        def on_qr_result(requestCode, resultCode, intent):
+            if requestCode == 0:
+                if resultCode == -1: # RESULT_OK:
+                    contents = intent.getStringExtra("SCAN_RESULT")
+                    if intent.getStringExtra("SCAN_RESULT_FORMAT") == 'QR_CODE':
+                        on_complete(contents)
+                    else:
+                        self.show_error("wrong format " + intent.getStringExtra("SCAN_RESULT_FORMAT"))
+        activity.bind(on_activity_result=on_qr_result)
+        integrator.initiateScan()
 
     def build(self):
         return Builder.load_file('gui/kivy/main.kv')
@@ -285,37 +357,48 @@ class ElectrumWindow(App):
     def on_start(self):
         ''' This is the start point of the kivy ui
         '''
-        Logger.info("dpi: {} {}".format(metrics.dpi, metrics.dpi_rounded))
+        import time
+        Logger.info('Time to on_start: {} <<<<<<<<'.format(time.clock()))
         win = Window
-        win.bind(size=self.on_size,
-                    on_keyboard=self.on_keyboard)
+        win.bind(size=self.on_size, on_keyboard=self.on_keyboard)
         win.bind(on_key_down=self.on_key_down)
-
-        # Register fonts without this you won't be able to use bold/italic...
-        # inside markup.
-        from kivy.core.text import Label
-        Label.register('Roboto',
-                   'data/fonts/Roboto.ttf',
-                   'data/fonts/Roboto.ttf',
-                   'data/fonts/Roboto-Bold.ttf',
-                   'data/fonts/Roboto-Bold.ttf')
-
-        if platform == 'android':
-            # bind to keyboard height so we can get the window contents to
-            # behave the way we want when the keyboard appears.
-            win.bind(keyboard_height=self.on_keyboard_height)
-
+        win.softinput_mode = 'below_target'
         self.on_size(win, win.size)
         self.init_ui()
         self.load_wallet_by_name(self.electrum_config.get_wallet_path())
+        # init plugins
         run_hook('init_kivy', self)
+        # default tab
+        self.switch_to('history')
+        # bind intent for bitcoin: URI scheme
+        if platform == 'android':
+            from android import activity
+            from jnius import autoclass
+            PythonActivity = autoclass('org.renpy.android.PythonActivity')
+            mactivity = PythonActivity.mActivity
+            self.on_new_intent(mactivity.getIntent())
+            activity.bind(on_new_intent=self.on_new_intent)
+
+        # URI passed in config
+        uri = self.electrum_config.get('url')
+        if uri:
+            self.set_URI(uri)
+
+    def get_wallet_path(self):
+        if self.wallet:
+            return self.wallet.storage.path
+        else:
+            return ''
 
     def load_wallet_by_name(self, wallet_path):
         if not wallet_path:
             return
         config = self.electrum_config
-        storage = WalletStorage(wallet_path)
-        Logger.info('Electrum: Check for existing wallet')
+        try:
+            storage = WalletStorage(wallet_path)
+        except IOError:
+            self.show_error("Cannot read wallet file")
+            return
         if storage.file_exists:
             wallet = Wallet(storage)
             action = wallet.get_action()
@@ -337,22 +420,7 @@ class ElectrumWindow(App):
     def stop_wallet(self):
         if self.wallet:
             self.wallet.stop_threads()
-
-    def on_keyboard_height(self, window, height):
-        win = window
-        active_widg = win.children[0]
-        if not issubclass(active_widg.__class__, Factory.Popup):
-            try:
-                active_widg = self.root.children[0]
-            except IndexError:
-                return
-        try:
-            fw = self._focused_widget
-        except AttributeError:
-            return
-        if height > 0 and fw.to_window(*fw.pos)[1] > height:
-            return
-        Factory.Animation(y=win.keyboard_height, d=.1).start(active_widg)
+            self.wallet = None
 
     def on_key_down(self, instance, key, keycode, codepoint, modifiers):
         if 'ctrl' in modifiers:
@@ -374,16 +442,25 @@ class ElectrumWindow(App):
         #TODO: alt+tab_number to activate the particular tab
 
     def on_keyboard(self, instance, key, keycode, codepoint, modifiers):
+        if key == 27 and self.is_exit is False:
+            self.is_exit = True
+            self.show_info(_('Press again to exit'))
+            return True
         # override settings button
         if key in (319, 282): #f1/settings button on android
-            self.gui.main_gui.toggle_settings(self)
+            #self.gui.main_gui.toggle_settings(self)
             return True
+
+    def settings_dialog(self):
+        if self._settings_dialog is None:
+            from uix.dialogs.settings import SettingsDialog
+            self._settings_dialog = SettingsDialog(self)
+        self._settings_dialog.update()
+        self._settings_dialog.open()
 
     def popup_dialog(self, name):
         if name == 'settings':
-            from uix.dialogs.settings import SettingsDialog
-            d = SettingsDialog(self)
-            d.open()
+            self.settings_dialog()
         elif name == 'wallets':
             from uix.dialogs.wallets import WalletDialog
             d = WalletDialog()
@@ -415,18 +492,21 @@ class ElectrumWindow(App):
 
         # load and focus the ui
         self.root.manager = self.root.ids['manager']
-        self.recent_activity_card = None
+
         self.history_screen = None
         self.contacts_screen = None
+        self.send_screen = None
+        self.invoices_screen = None
+        self.receive_screen = None
+        self.requests_screen = None
 
         self.icon = "icons/electrum.png"
 
         # connect callbacks
         if self.network:
-            interests = ['updated', 'status', 'new_transaction']
+            interests = ['updated', 'status', 'new_transaction', 'verified']
             self.network.register_callback(self.on_network, interests)
 
-        #self.wallet = None
         self.tabs = self.root.ids['tabs']
 
     def on_network(self, event, *args):
@@ -435,7 +515,9 @@ class ElectrumWindow(App):
         elif event == 'status':
             self._trigger_update_status()
         elif event == 'new_transaction':
-            self._trigger_notify_transactions(*args)
+            self._trigger_update_wallet()
+        elif event == 'verified':
+            self._trigger_update_wallet()
 
     @profiler
     def load_wallet(self, wallet):
@@ -446,12 +528,14 @@ class ElectrumWindow(App):
         self.update_wallet()
         # Once GUI has been initialized check if we want to announce something
         # since the callback has been called before the GUI was initialized
+        if self.receive_screen:
+            self.receive_screen.clear()
         self.update_tabs()
-        self.notify_transactions()
         run_hook('load_wallet', wallet, self)
 
     def update_status(self, *dt):
         if not self.wallet:
+            self.status = _("No Wallet")
             return
         if self.network is None or not self.network.is_running():
             self.status = _("Offline")
@@ -465,13 +549,14 @@ class ElectrumWindow(App):
             else:
                 c, u, x = self.wallet.get_account_balance(self.current_account)
                 text = self.format_amount(c+x+u)
-                self.status = text.strip() + ' ' + self.base_unit
+                self.status = str(text.strip() + ' ' + self.base_unit)
         else:
             self.status = _("Not connected")
 
     def get_max_amount(self):
         inputs = self.wallet.get_spendable_coins(None)
-        amount, fee = self.wallet.get_max_amount(self.electrum_config, inputs, None)
+        addr = str(self.send_screen.screen.address) or self.wallet.dummy_address()
+        amount, fee = self.wallet.get_max_amount(self.electrum_config, inputs, (TYPE_ADDRESS, addr), None)
         return format_satoshis_plain(amount, self.decimal_point())
 
     def format_amount(self, x, is_diff=False, whitespaces=False):
@@ -483,52 +568,14 @@ class ElectrumWindow(App):
     @profiler
     def update_wallet(self, *dt):
         self._trigger_update_status()
-        #if self.wallet.up_to_date or not self.network or not self.network.is_connected():
-        self.update_tabs()
-
-    @profiler
-    def notify_transactions(self, *dt):
-        '''
-        '''
-        if not self.network or not self.network.is_connected():
-            return
-        # temporarily disabled for merge
-        return
-        iface = self.network
-        ptfn = iface.pending_transactions_for_notifications
-        if len(ptfn) > 0:
-            # Combine the transactions if there are more then three
-            tx_amount = len(ptfn)
-            if(tx_amount >= 3):
-                total_amount = 0
-                for tx in ptfn:
-                    is_relevant, is_mine, v, fee = self.wallet.get_tx_value(tx)
-                    if(v > 0):
-                        total_amount += v
-                self.notify(_("{txs}s new transactions received. Total amount"
-                              "received in the new transactions {amount}s"
-                              "{unit}s").format(txs=tx_amount,
-                                    amount=self.format_amount(total_amount),
-                                    unit=self.base_unit()))
-
-                iface.pending_transactions_for_notifications = []
-            else:
-              for tx in iface.pending_transactions_for_notifications:
-                  if tx:
-                      iface.pending_transactions_for_notifications.remove(tx)
-                      is_relevant, is_mine, v, fee = self.wallet.get_tx_value(tx)
-                      if(v > 0):
-                          self.notify(
-                              _("{txs} new transaction received. {amount} {unit}").
-                              format(txs=tx_amount, amount=self.format_amount(v),
-                                     unit=self.base_unit))
+        if self.wallet and (self.wallet.up_to_date or not self.network or not self.network.is_connected()):
+            self.update_tabs()
 
     def notify(self, message):
         try:
             global notification, os
             if not notification:
                 from plyer import notification
-                import os
             icon = (os.path.dirname(os.path.realpath(__file__))
                     + '/../../' + self.icon)
             notification.notify('Electrum', message,
@@ -537,20 +584,12 @@ class ElectrumWindow(App):
             Logger.Error('Notification: needs plyer; `sudo pip install plyer`')
 
     def on_pause(self):
-        '''
-        '''
         # pause nfc
-        if self.qrscanner:
-            self.qrscanner.stop()
         if self.nfcscanner:
             self.nfcscanner.nfc_disable()
         return True
 
     def on_resume(self):
-        '''
-        '''
-        if self.qrscanner and qrscanner.get_parent_window():
-            self.qrscanner.start()
         if self.nfcscanner:
             self.nfcscanner.nfc_enable()
 
@@ -558,9 +597,15 @@ class ElectrumWindow(App):
         width, height = value
         self._orientation = 'landscape' if width > height else 'portrait'
         self._ui_mode = 'tablet' if min(width, height) > inch(3.51) else 'phone'
-        #Logger.info("size: {} {}".format(width, height))
-        #Logger.info('orientation: {}'.format(self._orientation))
-        #Logger.info('ui_mode: {}'.format(self._ui_mode))
+
+    def on_ref_label(self, label, touch):
+        if label.touched:
+            label.touched = False
+            self.qr_dialog(label.name, label.data, True)
+        else:
+            label.touched = True
+            self._clipboard.copy(label.data)
+            Clock.schedule_once(lambda dt: self.show_info(_('Text copied to clipboard.\nTap again to display it as QR code.')))
 
     def set_send(self, address, amount, label, message):
         self.send_payment(address, amount=amount, label=label, message=message)
@@ -578,7 +623,7 @@ class ElectrumWindow(App):
         exit=False, duration=0, modal=False):
         ''' Show a Info Message Bubble.
         '''
-        self.show_error(error, icon='atlas://gui/kivy/theming/light/error',
+        self.show_error(error, icon='atlas://gui/kivy/theming/light/important',
             duration=duration, modal=modal, exit=exit, pos=pos,
             arrow_pos=arrow_pos)
 
@@ -632,13 +677,39 @@ class ElectrumWindow(App):
             pos = (win.center[0], win.center[1] - (info_bubble.height/2))
         info_bubble.show(pos, duration, width, modal=modal, exit=exit)
 
-    def tx_details_dialog(self, obj):
-        popup = Builder.load_file('gui/kivy/uix/ui_screens/transaction.kv')
-        popup.tx_hash = obj.tx_hash
-        popup.open()
+    def tx_dialog(self, tx):
+        from uix.dialogs.tx_dialog import TxDialog
+        d = TxDialog(self, tx)
+        d.open()
 
-    def address_dialog(self, screen):
-        pass
+    def sign_tx(self, *args):
+        threading.Thread(target=self._sign_tx, args=args).start()
+
+    def _sign_tx(self, tx, password, on_success, on_failure):
+        try:
+            self.wallet.sign_transaction(tx, password)
+        except InvalidPassword:
+            Clock.schedule_once(lambda dt: on_failure(_("Invalid PIN")))
+            return
+        Clock.schedule_once(lambda dt: on_success(tx))
+
+    def _broadcast_thread(self, tx, on_complete):
+        ok, txid = self.network.broadcast(tx)
+        Clock.schedule_once(lambda dt: on_complete(ok, txid))
+
+    def broadcast(self, tx, pr=None):
+        def on_complete(ok, txid):
+            self.show_info(txid)
+            if ok and pr:
+                pr.set_paid(tx.hash())
+                self.invoices.save()
+                self.update_tab('invoices')
+
+        if self.network and self.network.is_connected():
+            self.show_info(_('Sending'))
+            threading.Thread(target=self._broadcast_thread, args=(tx, on_complete)).start()
+        else:
+            self.show_info(_('Cannot broadcast transaction') + ':\n' + _('Not connected'))
 
     def description_dialog(self, screen):
         from uix.dialogs.label_dialog import LabelDialog
@@ -660,37 +731,85 @@ class ElectrumWindow(App):
         popup = AmountDialog(show_max, amount, cb)
         popup.open()
 
-    def protected(self, f, args):
+    def protected(self, msg, f, args):
         if self.wallet.use_encryption:
-            self.password_dialog(_('Enter PIN'), f, args)
+            self.password_dialog(msg, f, args)
         else:
             apply(f, args + (None,))
 
-    def change_password(self):
-        self.protected(self._change_password, ())
+    def delete_wallet(self):
+        from uix.dialogs.question import Question
+        basename = os.path.basename(self.wallet.storage.path)
+        d = Question(_('Delete wallet?') + '\n' + basename, self._delete_wallet)
+        d.open()
 
-    def _change_password(self, old_password):
+    def _delete_wallet(self):
+        basename = os.path.basename(self.wallet.storage.path)
+        self.protected(_("Enter your PIN code to confirm deletion of %s") % basename, self.__delete_wallet, ())
+
+    def __delete_wallet(self, pw):
+        wallet_path = self.get_wallet_path()
+        dirname = os.path.dirname(wallet_path)
+        basename = os.path.basename(wallet_path)
         if self.wallet.use_encryption:
+            try:
+                self.wallet.check_password(pw)
+            except:
+                self.show_error("Invalid PIN")
+                return
+        self.stop_wallet()
+        os.unlink(wallet_path)
+        self.show_error("Wallet removed:" + basename)
+        d = os.listdir(dirname)
+        name = 'default_wallet'
+        new_path = os.path.join(dirname, name)
+        self.load_wallet_by_name(new_path)
+
+    def show_seed(self, label):
+        self.protected(_("Enter your PIN code in order to decrypt your seed"), self._show_seed, (label,))
+
+    def _show_seed(self, label, password):
+        if self.wallet.use_encryption and password is None:
+            return
+        try:
+            seed = self.wallet.get_seed(password)
+        except:
+            self.show_error("Invalid PIN")
+            return
+        label.text = _('Seed') + ':\n' + seed
+
+    def change_password(self, cb):
+        if self.wallet.use_encryption:
+            self.protected(_("Changing PIN code.") + '\n' + _("Enter your current PIN:"), self._change_password, (cb,))
+        else:
+            self._change_password(cb, None)
+
+    def _change_password(self, cb, old_password):
+        if self.wallet.use_encryption:
+            if old_password is None:
+                return
             try:
                 self.wallet.check_password(old_password)
             except InvalidPassword:
                 self.show_error("Invalid PIN")
                 return
-        self.password_dialog(_('Enter new PIN'), self._change_password2, (old_password,))
+        self.password_dialog(_('Enter new PIN'), self._change_password2, (cb, old_password,))
 
-    def _change_password2(self, old_password, new_password):
-        self.password_dialog(_('Confirm new PIN'), self._change_password3, (old_password, new_password))
+    def _change_password2(self, cb, old_password, new_password):
+        self.password_dialog(_('Confirm new PIN'), self._change_password3, (cb, old_password, new_password))
 
-    def _change_password3(self, old_password, new_password, confirmed_password):
+    def _change_password3(self, cb, old_password, new_password, confirmed_password):
         if new_password == confirmed_password:
             self.wallet.update_password(old_password, new_password)
+            cb()
         else:
             self.show_error("PIN numbers do not match")
 
-    def password_dialog(self, title, f, args):
-        from uix.dialogs.password_dialog import PasswordDialog
+    def password_dialog(self, msg, f, args):
         def callback(pw):
             Clock.schedule_once(lambda x: apply(f, args + (pw,)), 0.1)
-        popup = PasswordDialog(title, callback)
-        popup.open()
-
+        if self._password_dialog is None:
+            from uix.dialogs.password_dialog import PasswordDialog
+            self._password_dialog = PasswordDialog()
+        self._password_dialog.init(msg, callback)
+        self._password_dialog.open()

@@ -3,18 +3,25 @@
 # Electrum - lightweight Bitcoin client
 # Copyright (C) 2015 Thomas Voegtlin
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+# Permission is hereby granted, free of charge, to any person
+# obtaining a copy of this software and associated documentation files
+# (the "Software"), to deal in the Software without restriction,
+# including without limitation the rights to use, copy, modify, merge,
+# publish, distribute, sublicense, and/or sell copies of the Software,
+# and to permit persons to whom the Software is furnished to do so,
+# subject to the following conditions:
 #
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-# GNU General Public License for more details.
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
 #
-# You should have received a copy of the GNU General Public License
-# along with this program. If not, see <http://www.gnu.org/licenses/>.
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+# BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+# ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+# CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
 
 from collections import namedtuple
 import traceback
@@ -26,8 +33,8 @@ import time
 
 from util import *
 from i18n import _
-from util import profiler, PrintError, DaemonThread
-import wallet
+from util import profiler, PrintError, DaemonThread, UserCancelled
+
 
 class Plugins(DaemonThread):
 
@@ -45,8 +52,9 @@ class Plugins(DaemonThread):
         self.plugins = {}
         self.gui_name = gui_name
         self.descriptions = {}
-        self.device_manager = DeviceMgr()
+        self.device_manager = DeviceMgr(config)
         self.load_plugins()
+        self.add_jobs(self.device_manager.thread_jobs())
         self.start()
 
     def load_plugins(self):
@@ -136,17 +144,21 @@ class Plugins(DaemonThread):
                         wallet_types.append(details[1])
                         descs.append(details[2])
                 except:
+                    traceback.print_exc()
                     self.print_error("cannot load plugin for:", name)
         return wallet_types, descs
 
     def register_plugin_wallet(self, name, gui_good, details):
+        from wallet import Wallet
+
         def dynamic_constructor(storage):
             return self.wallet_plugin_loader(name).wallet_class(storage)
 
         if details[0] == 'hardware':
             self.hw_wallets[name] = (gui_good, details)
         self.print_error("registering wallet %s: %s" %(name, details))
-        wallet.wallet_types.append(details + (dynamic_constructor,))
+        Wallet.register_plugin_wallet(details[0], details[1],
+                                      dynamic_constructor)
 
     def wallet_plugin_loader(self, name):
         if not name in self.plugins:
@@ -157,7 +169,7 @@ class Plugins(DaemonThread):
         while self.is_running():
             time.sleep(0.1)
             self.run_jobs()
-        self.print_error("stopped")
+        self.on_stop()
 
 
 hook_names = set()
@@ -234,10 +246,17 @@ class BasePlugin(PrintError):
     def settings_dialog(self):
         pass
 
+
+class DeviceNotFoundError(Exception):
+    pass
+
+class DeviceUnpairableError(Exception):
+    pass
+
 Device = namedtuple("Device", "path interface_number id_ product_key")
 DeviceInfo = namedtuple("DeviceInfo", "device description initialized")
 
-class DeviceMgr(PrintError):
+class DeviceMgr(ThreadJob, PrintError):
     '''Manages hardware clients.  A client communicates over a hardware
     channel with the device.
 
@@ -266,11 +285,9 @@ class DeviceMgr(PrintError):
     the HID IDs.
 
     This plugin is thread-safe.  Currently only devices supported by
-    hidapi are implemented.
+    hidapi are implemented.'''
 
-    '''
-
-    def __init__(self):
+    def __init__(self, config):
         super(DeviceMgr, self).__init__()
         # Keyed by wallet.  The value is the device id if the wallet
         # has been paired, and None otherwise.
@@ -283,6 +300,20 @@ class DeviceMgr(PrintError):
         self.recognised_hardware = set()
         # For synchronization
         self.lock = threading.RLock()
+        self.config = config
+
+    def thread_jobs(self):
+        # Thread job to handle device timeouts
+        return [self]
+
+    def run(self):
+        '''Handle device timeouts.  Runs in the context of the Plugins
+        thread.'''
+        with self.lock:
+            clients = list(self.clients.keys())
+        cutoff = time.time() - self.config.get_session_timeout()
+        for client in clients:
+            client.timeout(cutoff)
 
     def register_devices(self, device_pairs):
         for pair in device_pairs:
@@ -333,9 +364,6 @@ class DeviceMgr(PrintError):
             self.wallets[wallet] = id_
         wallet.paired()
 
-    def paired_wallets(self):
-        return list(self.wallets.keys())
-
     def client_lookup(self, id_):
         with self.lock:
             for client, (path, client_id) in self.clients.items():
@@ -358,6 +386,9 @@ class DeviceMgr(PrintError):
 
         client = self.client_lookup(wallet_id)
         if client:
+            # An unpaired client might have another wallet's handler
+            # from a prior scan.  Replace to fix dialog parenting.
+            client.handler = wallet.handler
             return client
 
         for device in devices:
@@ -365,25 +396,40 @@ class DeviceMgr(PrintError):
                 return self.create_client(device, wallet.handler, plugin)
 
         if force_pair:
-            first_address, derivation = wallet.first_address()
-            assert first_address
-
-            # The wallet has not been previously paired, so let the user
-            # choose an unpaired device and compare its first address.
-            info = self.select_device(wallet, plugin, devices)
-            if info:
-                client = self.client_lookup(info.device.id_)
-                if client and not client.features.bootloader_mode:
-                    # An unpaired client might have another wallet's handler
-                    # from a prior scan.  Replace to fix dialog parenting.
-                    client.handler = wallet.handler
-                    # This will trigger a PIN/passphrase entry request
-                    client_first_address = client.first_address(derivation)
-                    if client_first_address == first_address:
-                        self.pair_wallet(wallet, info.device.id_)
-                        return client
+            return self.force_pair_wallet(plugin, wallet, devices)
 
         return None
+
+    def force_pair_wallet(self, plugin, wallet, devices):
+        first_address, derivation = wallet.first_address()
+        assert first_address
+
+        # The wallet has not been previously paired, so let the user
+        # choose an unpaired device and compare its first address.
+        info = self.select_device(wallet, plugin, devices)
+
+        client = self.client_lookup(info.device.id_)
+        if client and client.is_pairable():
+            # See comment above for same code
+            client.handler = wallet.handler
+            # This will trigger a PIN/passphrase entry request
+            try:
+                client_first_address = client.first_address(derivation)
+            except (UserCancelled, RuntimeError):
+                 # Bad / cancelled PIN / passphrase
+                client_first_address = None
+            if client_first_address == first_address:
+                self.pair_wallet(wallet, info.device.id_)
+                return client
+
+        # The user input has wrong PIN or passphrase, or cancelled input,
+        # or it is not pairable
+        raise DeviceUnpairableError(
+            _('Electrum cannot pair with your %s.\n\n'
+              'Before you request bitcoins to be sent to addresses in this '
+              'wallet, ensure you can pair with your device, or that you have '
+              'its seed (and passphrase, if any).  Otherwise all bitcoins you '
+              'receive will be unspendable.') % plugin.device)
 
     def unpaired_device_infos(self, handler, plugin, devices=None):
         '''Returns a list of DeviceInfo objects: one for each connected,
@@ -410,9 +456,17 @@ class DeviceMgr(PrintError):
     def select_device(self, wallet, plugin, devices=None):
         '''Ask the user to select a device to use if there is more than one,
         and return the DeviceInfo for the device.'''
-        infos = self.unpaired_device_infos(wallet.handler, plugin, devices)
-        if not infos:
-            return None
+        while True:
+            infos = self.unpaired_device_infos(wallet.handler, plugin, devices)
+            if infos:
+                break
+            msg = _('Could not connect to your %s.  Verify the cable is '
+                    'connected and that no other application is using it.\n\n'
+                    'Try to connect again?') % plugin.device
+            if not wallet.handler.yes_no_question(msg):
+                raise UserCancelled()
+            devices = None
+
         if len(infos) == 1:
             return infos[0]
         msg = _("Please select which %s device to use:") % plugin.device
@@ -433,7 +487,9 @@ class DeviceMgr(PrintError):
         for d in hid.enumerate(0, 0):
             product_key = (d['vendor_id'], d['product_id'])
             if product_key in self.recognised_hardware:
-                devices.append(Device(d['path'], d['interface_number'],
+                # Older versions of hid don't provide interface_number
+                interface_number = d.get('interface_number', 0)
+                devices.append(Device(d['path'], interface_number,
                                       d['serial_number'], product_key))
 
         # Now find out what was disconnected

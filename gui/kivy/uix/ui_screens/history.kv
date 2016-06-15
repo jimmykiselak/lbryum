@@ -1,6 +1,6 @@
-#:import _ electrum.i18n._
+#:import _ electrum_gui.kivy.i18n._
 #:import Factory kivy.factory.Factory
-#:set font_light 'data/fonts/Roboto-Condensed.ttf'
+#:set font_light 'gui/kivy/data/fonts/Roboto-Condensed.ttf'
 #:set btc_symbol unichr(171)
 #:set mbtc_symbol unichr(187)
 
@@ -20,7 +20,8 @@
     icon: 'atlas://gui/kivy/theming/light/important'
     message: ''
     value: 0
-    amount: app.format_amount(self.value, True) if self.value is not None else '--'
+    value_known: True
+    amount: app.format_amount(self.value, True) if self.value_known else '--'
     amount_color: '#FF6657' if self.value < 0 else '#2EA442'
     confirmations: 0
     date: ''

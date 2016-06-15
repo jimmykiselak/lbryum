@@ -3,18 +3,25 @@
 # Electrum - lightweight Bitcoin client
 # Copyright (C) 2012 thomasv@gitorious
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+# Permission is hereby granted, free of charge, to any person
+# obtaining a copy of this software and associated documentation files
+# (the "Software"), to deal in the Software without restriction,
+# including without limitation the rights to use, copy, modify, merge,
+# publish, distribute, sublicense, and/or sell copies of the Software,
+# and to permit persons to whom the Software is furnished to do so,
+# subject to the following conditions:
 #
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-# GNU General Public License for more details.
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
 #
-# You should have received a copy of the GNU General Public License
-# along with this program. If not, see <http://www.gnu.org/licenses/>.
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+# BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+# ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+# CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
 
 import sys
 import os
@@ -66,13 +73,12 @@ class OpenFileEventFilter(QObject):
 
 class ElectrumGui:
 
-    def __init__(self, config, network, daemon, plugins):
+    def __init__(self, config, daemon, plugins):
         set_language(config.get('language'))
         # Uncomment this call to verify objects are being properly
         # GC-ed when windows are closed
         #network.add_jobs([DebugMem([Abstract_Wallet, SPV, Synchronizer,
         #                            ElectrumWindow], interval=5)])
-        self.network = network
         self.config = config
         self.daemon = daemon
         self.plugins = plugins
@@ -92,6 +98,7 @@ class ElectrumGui:
         self.build_tray_menu()
         self.tray.show()
         self.app.connect(self.app, QtCore.SIGNAL('new_window'), self.start_new_window)
+        run_hook('init_qt', self)
 
     def build_tray_menu(self):
         # Avoid immediate GC of old menu when window closed via its action
@@ -167,21 +174,15 @@ class ElectrumGui:
         self.windows.remove(window)
         self.build_tray_menu()
         # save wallet path of last open window
-        if self.config.get('wallet_path') is None and not self.windows:
-            path = window.wallet.storage.path
-            self.config.set_key('gui_last_wallet', path)
+        if not self.windows:
+            self.config.save_last_wallet(window.wallet)
         run_hook('on_close_window', window)
 
     def main(self):
         self.timer.start()
-        # open last wallet
-        if self.config.get('wallet_path') is None:
-            last_wallet = self.config.get('gui_last_wallet')
-            if last_wallet is not None and os.path.exists(last_wallet):
-                self.config.cmdline_options['default_wallet_path'] = last_wallet
-
-        if not self.start_new_window(self.config.get_wallet_path(),
-                                     self.config.get('url')):
+        self.config.open_last_wallet()
+        path = self.config.get_wallet_path()
+        if not self.start_new_window(path, self.config.get('url')):
             return
 
         signal.signal(signal.SIGINT, lambda *args: self.app.quit())

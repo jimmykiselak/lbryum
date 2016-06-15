@@ -3,18 +3,25 @@
 # Electrum - Lightweight Bitcoin Client
 # Copyright (C) 2015 Thomas Voegtlin
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+# Permission is hereby granted, free of charge, to any person
+# obtaining a copy of this software and associated documentation files
+# (the "Software"), to deal in the Software without restriction,
+# including without limitation the rights to use, copy, modify, merge,
+# publish, distribute, sublicense, and/or sell copies of the Software,
+# and to permit persons to whom the Software is furnished to do so,
+# subject to the following conditions:
 #
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-# GNU General Public License for more details.
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
 #
-# You should have received a copy of the GNU General Public License
-# along with this program. If not, see <http://www.gnu.org/licenses/>.
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+# BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+# ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+# CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
 
 import socket
 import os
@@ -34,8 +41,6 @@ from lbryum.wallet import Multisig_Wallet, BIP32_Wallet
 from lbryum.i18n import _
 from lbryum.plugins import BasePlugin, run_hook, hook
 from lbryum.util import NotEnoughFunds
-
-from decimal import Decimal
 
 # signing_xpub is hardcoded so that the wallet can be restored from seed, without TrustedCoin's server
 signing_xpub = "xpub661MyMwAqRbcGnMkaTx2594P9EDuiEqMq25PM2aeG6UmwzaohgA6uDmNsvSUV8ubqwA3Wpste1hg69XHgjUuCD5HLcEp2QPzyV1HMrPppsL"
@@ -206,43 +211,57 @@ class Wallet_2fa(Multisig_Wallet):
     def can_sign_without_server(self):
         return self.master_private_keys.get('x2/') is not None
 
-    def extra_fee(self, tx=None):
+    def get_max_amount(self, config, inputs, recipient, fee):
+        from electrum.transaction import Transaction
+        sendable = sum(map(lambda x:x['value'], inputs))
+        for i in inputs:
+            self.add_input_info(i)
+        xf = self.extra_fee()
+        if xf and sendable >= xf:
+            billing_address = self.billing_info['billing_address']
+            sendable -= xf
+            _type, addr = recipient
+            outputs = [(_type, addr, sendable),
+                       (TYPE_ADDRESS, billing_address, xf)]
+        else:
+            outputs = [(TYPE_ADDRESS, recipient, sendable)]
+
+        dummy_tx = Transaction.from_io(inputs, outputs)
+        if fee is None:
+            fee = self.estimate_fee(config, dummy_tx.estimated_size())
+        amount = max(0, sendable - fee)
+        return amount, fee
+
+    def extra_fee(self):
         if self.can_sign_without_server():
             return 0
         if self.billing_info.get('tx_remaining'):
             return 0
         if self.is_billing:
             return 0
-        # trustedcoin won't charge if the total inputs is lower than their fee
         price = int(self.price_per_tx.get(1))
         assert price <= 100000
-        if tx and tx.input_value() < price:
-            self.print_error("not charging for this tx")
-            return 0
         return price
-
-    def estimated_fee(self, tx, fee_per_kb):
-        fee = tx.estimated_fee(fee_per_kb)
-        fee += self.extra_fee(tx)
-        return fee
 
     def make_unsigned_transaction(self, coins, outputs, config,
                                   fixed_fee=None, change_addr=None):
-        tx = BIP32_Wallet.make_unsigned_transaction(
-            self, coins, outputs, config, fixed_fee, change_addr)
-        # Plain TX was good.  Now add trustedcoin fee.
+        mk_tx = lambda o: BIP32_Wallet.make_unsigned_transaction(
+            self, coins, o, config, fixed_fee, change_addr)
         fee = self.extra_fee()
         if fee:
             address = self.billing_info['billing_address']
-            outputs = outputs + [(TYPE_ADDRESS, address, fee)]
+            fee_output = (TYPE_ADDRESS, address, fee)
             try:
-                return BIP32_Wallet.make_unsigned_transaction(
-                    self, coins, outputs, config, fixed_fee, change_addr)
+                tx = mk_tx(outputs + [fee_output])
             except NotEnoughFunds:
                 # trustedcoin won't charge if the total inputs is
                 # lower than their fee
+                tx = mk_tx(outputs)
                 if tx.input_value() >= fee:
                     raise
+                self.print_error("not charging for this tx")
+        else:
+            tx = mk_tx(outputs)
         return tx
 
     def sign_transaction(self, tx, password):
@@ -312,6 +331,13 @@ class TrustedCoinPlugin(BasePlugin):
     def is_enabled(self):
         return True
 
+    @hook
+    def get_additional_fee(self, wallet, tx):
+        address = wallet.billing_info['billing_address']
+        for _type, addr, amount in tx.outputs():
+            if _type == TYPE_ADDRESS and addr == address:
+                return amount
+
     def request_billing_info(self, wallet):
         billing_info = server.get(wallet.get_user_id()[1])
         billing_address = make_billing_address(wallet, billing_info['billing_index'])
@@ -361,7 +387,7 @@ class TrustedCoinPlugin(BasePlugin):
         words = seed.split()
         n = len(words)/2
         wallet.add_xprv_from_seed(' '.join(words[0:n]), 'x1/', password)
-        wallet.add_xpub_from_seed(' '.join(words[n:]), 'x2/')
+        wallet.add_xprv_from_seed(' '.join(words[n:]), 'x2/', password)
 
         restore_third_key(wallet)
         wallet.create_main_account()

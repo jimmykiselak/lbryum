@@ -1,3 +1,26 @@
+# Electrum - Lightweight Bitcoin Client
+# Copyright (c) 2011-2016 Thomas Voegtlin
+#
+# Permission is hereby granted, free of charge, to any person
+# obtaining a copy of this software and associated documentation files
+# (the "Software"), to deal in the Software without restriction,
+# including without limitation the rights to use, copy, modify, merge,
+# publish, distribute, sublicense, and/or sell copies of the Software,
+# and to permit persons to whom the Software is furnished to do so,
+# subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+# BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+# ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+# CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
 import time
 import Queue
 import os
@@ -23,7 +46,7 @@ from version import ELECTRUM_VERSION, PROTOCOL_VERSION
 log = logging.getLogger("lbryum")
 
 DEFAULT_PORTS = {'t': '50001', 's': '50002', 'h': '8081', 'g': '8082'}
-
+FEE_TARGETS = [25, 10, 5, 2]
 DEFAULT_SERVERS = {
     'lbryum1.lbry.io': {'t': '50001'},
     'lbryum2.lbry.io': {'t': '50001'},
@@ -139,8 +162,7 @@ class Network(util.DaemonThread):
 
     - Member functions get_header(), get_interfaces(), get_local_height(),
           get_parameters(), get_server_height(), get_status_value(),
-          is_connected(), new_blockchain_height(), set_parameters(),
-          stop()
+          is_connected(), set_parameters(), stop()
     """
 
     def __init__(self, config=None):
@@ -170,7 +192,8 @@ class Network(util.DaemonThread):
         self.recent_servers = self.read_recent_servers()
 
         self.banner = ''
-        self.fee = None
+        self.donation_address = ''
+        self.fee_estimates = {}
         self.relay_fee = None
         self.heights = {}
         self.merkle_roots = {}
@@ -197,7 +220,7 @@ class Network(util.DaemonThread):
         # to or have an ongoing connection with
         self.interface = None
         self.interfaces = {}
-        self.auto_connect = self.config.get('auto_connect', False)
+        self.auto_connect = self.config.get('auto_connect', True)
         self.connecting = set()
         self.socket_queue = Queue.Queue()
         self.start_network(deserialize_server(self.default_server)[2],
@@ -248,7 +271,7 @@ class Network(util.DaemonThread):
         sh = self.get_server_height()
         if not sh:
             self.print_error('no height for main interface')
-            return False
+            return True
         lh = self.get_local_height()
         result = (lh - sh) > 1
         if result:
@@ -292,8 +315,10 @@ class Network(util.DaemonThread):
         for addr in self.subscribed_addresses:
             self.queue_request('blockchain.address.subscribe', [addr])
         self.queue_request('server.banner', [])
+        self.queue_request('server.donation_address', [])
         self.queue_request('server.peers.subscribe', [])
-        self.queue_request('blockchain.estimatefee', [2])
+        for i in FEE_TARGETS:
+            self.queue_request('blockchain.estimatefee', [i])
         self.queue_request('blockchain.relayfee', [])
 
     def get_status_value(self, key):
@@ -302,7 +327,7 @@ class Network(util.DaemonThread):
         elif key == 'banner':
             value = self.banner
         elif key == 'fee':
-            value = self.fee
+            value = self.fee_estimates
         elif key == 'updated':
             value = (self.get_local_height(), self.get_server_height())
         elif key == 'servers':
@@ -310,6 +335,26 @@ class Network(util.DaemonThread):
         elif key == 'interfaces':
             value = self.get_interfaces()
         return value
+
+    def dynfee(self, i):
+        from bitcoin import RECOMMENDED_FEE
+        if i < 4:
+            j = FEE_TARGETS[i]
+            fee = self.fee_estimates.get(j)
+        else:
+            assert i == 4
+            fee = self.fee_estimates.get(2)
+            if fee is not None:
+                fee += fee/2
+        if fee is not None:
+            fee = min(10*RECOMMENDED_FEE, fee)
+        return fee
+
+    def reverse_dynfee(self, fee_per_kb):
+        import operator
+        dist = map(lambda x: (x[0], abs(x[1] - fee_per_kb)), self.fee_estimates.items())
+        min_target, min_value = min(dist, key=operator.itemgetter(1))
+        return min_target
 
     def notify(self, key):
         if key in ['status', 'updated']:
@@ -320,6 +365,10 @@ class Network(util.DaemonThread):
     def get_parameters(self):
         host, port, protocol = deserialize_server(self.default_server)
         return host, port, protocol, self.proxy, self.auto_connect
+
+    def get_donation_address(self):
+        if self.is_connected():
+            return self.donation_address
 
     def get_interfaces(self):
         '''The interfaces that are in connected state'''
@@ -462,10 +511,6 @@ class Network(util.DaemonThread):
         self.recent_servers = self.recent_servers[0:20]
         self.save_recent_servers()
 
-    def new_blockchain_height(self, blockchain_height, i):
-        self.switch_lagging_interface(i.server)
-        self.notify('updated')
-
     def process_response(self, interface, response, callbacks):
         if self.debug:
             self.print_error("<--", response)
@@ -488,10 +533,13 @@ class Network(util.DaemonThread):
             if error is None:
                 self.banner = result
                 self.notify('banner')
+        elif method == 'server.donation_address':
+            if error is None:
+                self.donation_address = result
         elif method == 'blockchain.estimatefee':
             if error is None:
-                self.fee = int(result * COIN)
-                self.print_error("recommended fee", self.fee)
+                i = params[0]
+                self.fee_estimates[i] = int(result * COIN)
                 self.notify('fee')
         elif method == 'blockchain.relayfee':
             if error is None:
@@ -698,6 +746,7 @@ class Network(util.DaemonThread):
                 if next_height in [True, False]:
                     self.bc_requests.popleft()
                     if next_height:
+                        self.switch_lagging_interface(interface.server)
                         self.notify('updated')
                     else:
                         interface.print_error("header didn't connect, dismissing interface")
@@ -772,7 +821,7 @@ class Network(util.DaemonThread):
             self.process_pending_sends()
 
         self.stop_network()
-        self.print_error("stopped")
+        self.on_stop()
 
     def on_header(self, i, header):
         height = header.get('block_height')
@@ -796,10 +845,23 @@ class Network(util.DaemonThread):
     def get_local_height(self):
         return self.blockchain.height()
 
-    def synchronous_get(self, request, timeout=100000000):
+    def synchronous_get(self, request, timeout=30):
         queue = Queue.Queue()
         self.send([request], queue.put)
-        r = queue.get(True, timeout)
+        try:
+            r = queue.get(True, timeout)
+        except Queue.Empty:
+            raise BaseException('Server did not answer')
         if r.get('error'):
             raise BaseException(r.get('error'))
         return r.get('result')
+
+    def broadcast(self, tx, timeout=30):
+        tx_hash = tx.hash()
+        try:
+            out = self.synchronous_get(('blockchain.transaction.broadcast', [str(tx)]), timeout)
+        except BaseException as e:
+            return False, "error: " + str(e)
+        if out != tx_hash:
+            return False, "error: " + out
+        return True, out

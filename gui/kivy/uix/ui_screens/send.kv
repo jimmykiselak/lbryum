@@ -1,20 +1,17 @@
-#:import _ electrum.i18n._
+#:import _ electrum_gui.kivy.i18n._
 #:import Decimal decimal.Decimal
-
-#:import Factory kivy.factory.Factory
 #:set btc_symbol unichr(171)
 #:set mbtc_symbol unichr(187)
-#:set font_light 'data/fonts/Roboto-Condensed.ttf'
+#:set font_light 'gui/kivy/data/fonts/Roboto-Condensed.ttf'
 
 
 SendScreen:
-
     id: s
     name: 'send'
     address: ''
     amount: ''
     message: ''
-
+    is_pr: False
     BoxLayout
         padding: '12dp', '12dp', '12dp', '12dp'
         spacing: '12dp'
@@ -23,23 +20,6 @@ SendScreen:
             id: blue_bottom
             size_hint: 1, None
             height: self.minimum_height
-            spacing: '5dp'
-            BoxLayout:
-                size_hint: 1, None
-                height: blue_bottom.item_height
-                spacing: '5dp'
-                Image:
-                    source: 'atlas://gui/kivy/theming/light/contact'
-                    size_hint: None, None
-                    size: '22dp', '22dp'
-                    pos_hint: {'center_y': .5}
-                BlueButton:
-                    id: payto_e
-                    text: s.address if s.address else _('Recipient')
-                    on_release: app.address_dialog(s)
-            CardSeparator:
-                opacity: message_selection.opacity
-                color: blue_bottom.foreground_color
             BoxLayout:
                 size_hint: 1, None
                 height: blue_bottom.item_height
@@ -50,12 +30,31 @@ SendScreen:
                     size: '22dp', '22dp'
                     pos_hint: {'center_y': .5}
                 BlueButton:
+                    id: payto_e
+                    text: s.address if s.address else _('Recipient')
+                    shorten: True
+                    on_release: Clock.schedule_once(lambda dt: app.show_info(_('Copy and paste the recipient address using the Paste button, or use the camera to scan a QR code.')))
+            CardSeparator:
+                opacity: int(not root.is_pr)
+                color: blue_bottom.foreground_color
+            BoxLayout:
+                size_hint: 1, None
+                height: blue_bottom.item_height
+                spacing: '5dp'
+                Image:
+                    source: 'atlas://gui/kivy/theming/light/calculator'
+                    opacity: 0.7
+                    size_hint: None, None
+                    size: '22dp', '22dp'
+                    pos_hint: {'center_y': .5}
+                BlueButton:
                     id: amount_e
                     default_text: _('Amount')
                     text: s.amount if s.amount else _('Amount')
-                    on_release: s.amount_dialog()
+                    disabled: root.is_pr
+                    on_release: Clock.schedule_once(lambda dt: app.amount_dialog(s, True))
             CardSeparator:
-                opacity: message_selection.opacity
+                opacity: int(not root.is_pr)
                 color: blue_bottom.foreground_color
             BoxLayout:
                 id: message_selection
@@ -69,35 +68,35 @@ SendScreen:
                     pos_hint: {'center_y': .5}
                 BlueButton:
                     id: description
-                    text: s.message if s.message else _('Description')
-                    on_release: app.description_dialog(s)
+                    text: s.message if s.message else (_('No Description') if root.is_pr else _('Description'))
+                    disabled: root.is_pr
+                    on_release: Clock.schedule_once(lambda dt: app.description_dialog(s))
         BoxLayout:
             size_hint: 1, None
             height: '48dp'
-            Button:
+            IconButton:
                 id: qr
-                text: _('QR Code')
-                on_release:
-                    app.scan_qr(on_complete=app.set_URI)
+                size_hint: 0.6, 1
+                on_release: Clock.schedule_once(lambda dt: app.scan_qr(on_complete=app.on_qr))
+                icon: 'atlas://gui/kivy/theming/light/camera'
             Button:
-                id: paste_button
                 text: _('Paste')
-                on_release:
-                    s.parent.do_paste()
+                on_release: s.parent.do_paste()
             Button:
                 text: _('Clear')
-                size_hint: 1, None
-                height: '48dp'
                 on_release: s.parent.do_clear()
+            IconButton:
+                size_hint: 0.6, 1
+                on_release: s.parent.do_save()
+                icon: 'atlas://gui/kivy/theming/light/save'
         BoxLayout:
             size_hint: 1, None
             height: '48dp'
             Widget:
-                size_hint: 1, 1
+                size_hint: 2, 1
             Button:
-                text: _('Send')
-                size_hint: 1, None
-                height: '48dp'
+                text: _('Pay')
+                size_hint: 1, 1
                 on_release: s.parent.do_send()
         Widget:
             size_hint: 1, 1

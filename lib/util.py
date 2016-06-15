@@ -1,3 +1,28 @@
+#!/usr/bin/env python
+#
+# Electrum - lightweight Bitcoin client
+# Copyright (C) 2011 Thomas Voegtlin
+#
+# Permission is hereby granted, free of charge, to any person
+# obtaining a copy of this software and associated documentation files
+# (the "Software"), to deal in the Software without restriction,
+# including without limitation the rights to use, copy, modify, merge,
+# publish, distribute, sublicense, and/or sell copies of the Software,
+# and to permit persons to whom the Software is furnished to do so,
+# subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+# BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+# ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+# CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
 import os, sys, re, json
 import platform
 import shutil
@@ -14,6 +39,7 @@ from i18n import _
 log = logging.getLogger("lbryum")
 
 base_units = {'BTC':8, 'mBTC':5, 'uBTC':2}
+fee_levels = [_('Within 25 blocks'), _('Within 10 blocks'), _('Within 5 blocks'), _('Within 2 blocks'), _('In the next block')]
 
 def normalize_version(v):
     return [int(x) for x in re.sub(r'(\.0+)*$','', v).split(".")]
@@ -24,8 +50,10 @@ class InvalidPassword(Exception):
     def __str__(self):
         return _("Incorrect password")
 
-class SilentException(Exception):
-    '''An exception that should probably be suppressed from the user'''
+# Throw this exception to unwind the stack like when an error occurs.
+# However unlike other exceptions the user won't be informed.
+class UserCancelled(Exception):
+    '''An exception that is suppressed from the user'''
     pass
 
 class MyEncoder(json.JSONEncoder):
@@ -126,6 +154,12 @@ class DaemonThread(threading.Thread, PrintError):
         with self.running_lock:
             self.running = False
 
+    def on_stop(self):
+        if 'ANDROID_DATA' in os.environ:
+            import jnius
+            jnius.detach()
+            self.print_error("jnius detach")
+        self.print_error("stopped")
 
 
 is_verbose = False
@@ -158,7 +192,7 @@ def json_encode(obj):
 
 def json_decode(x):
     try:
-        return json.loads(x, parse_float=decimal.Decimal)
+        return json.loads(x, parse_float=Decimal)
     except:
         return x
 
@@ -174,6 +208,44 @@ def profiler(func):
     return lambda *args, **kw_args: do_profile(func, args, kw_args)
 
 
+def android_ext_dir():
+    import jnius
+    env = jnius.autoclass('android.os.Environment')
+    return env.getExternalStorageDirectory().getPath()
+
+def android_data_dir():
+    import jnius
+    PythonActivity = jnius.autoclass('org.renpy.android.PythonActivity')
+    return PythonActivity.mActivity.getFilesDir().getPath() + '/data'
+
+def android_headers_path():
+    path = android_ext_dir() + '/org.electrum.electrum/blockchain_headers'
+    d = os.path.dirname(path)
+    if not os.path.exists(d):
+        os.mkdir(d)
+    return path
+
+def android_check_data_dir():
+    """ if needed, move old directory to sandbox """
+    ext_dir = android_ext_dir()
+    data_dir = android_data_dir()
+    old_electrum_dir = ext_dir + '/electrum'
+    if not os.path.exists(data_dir) and os.path.exists(old_electrum_dir):
+        import shutil
+        new_headers_path = android_headers_path()
+        old_headers_path = old_electrum_dir + '/blockchain_headers'
+        if not os.path.exists(new_headers_path) and os.path.exists(old_headers_path):
+            print_error("Moving headers file to", new_headers_path)
+            shutil.move(old_headers_path, new_headers_path)
+        print_error("Moving data to", data_dir)
+        shutil.move(old_electrum_dir, data_dir)
+    return data_dir
+
+def get_headers_path(config):
+    if 'ANDROID_DATA' in os.environ:
+        return android_headers_path()
+    else:
+        return os.path.join(config.path, 'blockchain_headers')
 
 def user_dir():
     if "HOME" in os.environ:
@@ -183,14 +255,7 @@ def user_dir():
     elif "LOCALAPPDATA" in os.environ:
         return os.path.join(os.environ["LOCALAPPDATA"], "LBRYum")
     elif 'ANDROID_DATA' in os.environ:
-        try:
-            import jnius
-            env  = jnius.autoclass('android.os.Environment')
-            _dir =  env.getExternalStorageDirectory().getPath()
-            return _dir + '/lbryum/'
-        except ImportError:
-            pass
-        return "/sdcard/lbryum/"
+        return android_check_data_dir()
     else:
         #raise Exception("No home directory found in environment variables.")
         return
@@ -300,11 +365,15 @@ block_explorer_info = {
                         {'tx': 'tx/info', 'addr': 'address/info'}),
     'Blocktrail.com': ('https://www.blocktrail.com/BTC',
                         {'tx': 'tx', 'addr': 'address'}),
+    'BTC.com': ('https://chain.btc.com',
+                        {'tx': 'tx', 'addr': 'address'}),
     'Chain.so': ('https://www.chain.so',
                         {'tx': 'tx/BTC', 'addr': 'address/BTC'}),
     'Insight.is': ('https://insight.bitpay.com',
                         {'tx': 'tx', 'addr': 'address'}),
     'TradeBlock.com': ('https://tradeblock.com/blockchain',
+                        {'tx': 'tx', 'addr': 'address'}),
+    'system default': ('blockchain:',
                         {'tx': 'tx', 'addr': 'address'}),
 }
 
@@ -333,12 +402,13 @@ def parse_URI(uri, on_pr=None):
     from bitcoin import COIN
 
     if ':' not in uri:
-        assert bitcoin.is_address(uri)
+        if not bitcoin.is_address(uri):
+            raise BaseException("Not a bitcoin address")
         return {'address': uri}
 
     u = urlparse.urlparse(uri)
-    assert u.scheme == 'bitcoin'
-
+    if u.scheme != 'bitcoin':
+        raise BaseException("Not a bitcoin URI")
     address = u.path
 
     # python for android fails to parse query
@@ -354,7 +424,8 @@ def parse_URI(uri, on_pr=None):
 
     out = {k: v[0] for k, v in pq.items()}
     if address:
-        assert bitcoin.is_address(address)
+        if not bitcoin.is_address(address):
+            raise BaseException("Invalid bitcoin address:" + address)
         out['address'] = address
     if 'amount' in out:
         am = out['amount']

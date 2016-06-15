@@ -1,4 +1,4 @@
-from sys import stdout
+import sys
 
 from PyQt4.QtGui import *
 from PyQt4.QtCore import *
@@ -20,6 +20,7 @@ from lbryum.wizard import (WizardBase, UserCancelled,
                            MSG_COSIGNER, MSG_ENTER_SEED_OR_MPK,
                            MSG_SHOW_MPK, MSG_VERIFY_SEED,
                            MSG_GENERATING_WAIT)
+
 
 def clean_text(seed_e):
     text = unicode(seed_e.toPlainText()).strip()
@@ -64,11 +65,11 @@ class CosignWidget(QWidget):
 
 
 # WindowModalDialog must come first as it overrides show_error
-class InstallWizard(WindowModalDialog, WizardBase):
+class InstallWizard(QDialog, MessageBoxMixin, WizardBase):
 
     def __init__(self, config, app, plugins):
-        title = 'Electrum  -  ' + _('Install Wizard')
-        WindowModalDialog.__init__(self, None, title=title)
+        QDialog.__init__(self, None)
+        self.setWindowTitle('Electrum  -  ' + _('Install Wizard'))
         self.app = app
         self.config = config
         # Set for base base class
@@ -119,7 +120,7 @@ class InstallWizard(WindowModalDialog, WizardBase):
         self.refresh_gui()
 
     def on_error(self, exc_info):
-        if not isinstance(exc_info[1], SilentException):
+        if not isinstance(exc_info[1], UserCancelled):
             traceback.print_exception(*exc_info)
             self.show_error(str(exc_info[1]))
 
@@ -166,6 +167,9 @@ class InstallWizard(WindowModalDialog, WizardBase):
         except UserCancelled:
             self.print_error("wallet creation cancelled by user")
             self.accept()  # For when called from menu
+        except BaseException as e:
+            self.on_error(sys.exc_info())
+            raise
         return wallet
 
     def remove_from_recently_open(self, filename):
@@ -205,13 +209,15 @@ class InstallWizard(WindowModalDialog, WizardBase):
         self.set_main_layout(playout.layout())
         return playout.new_password()
 
-    def request_passphrase(self, device_text, restore=True):
-        """Request a passphrase for a wallet from the given device and
-        confirm it.  restore is True if restoring a wallet.  Should return
+    def request_passphrase(self, device_text):
+        """When restoring a wallet, request the passphrase that was used for
+        the wallet on the given device and confirm it.  Should return
         a unicode string."""
-        if restore:
-            msg = MSG_RESTORE_PASSPHRASE % device_text
-        return unicode(self.pw_layout(msg, PW_PASSPHRASE) or '')
+        phrase = self.pw_layout(MSG_RESTORE_PASSPHRASE % device_text,
+                                PW_PASSPHRASE)
+        if phrase is None:
+            raise UserCancelled
+        return phrase
 
     def request_password(self, msg=None):
         """Request the user enter a new password and confirm it.  Return
@@ -232,6 +238,7 @@ class InstallWizard(WindowModalDialog, WizardBase):
                 self.emit(QtCore.SIGNAL('synchronized'), msg)
             self.connect(self, QtCore.SIGNAL('synchronized'), self.show_message)
             t = threading.Thread(target = task)
+            t.daemon = True
             t.start()
         else:
             msg = _("This wallet was restored offline. It may "
@@ -254,7 +261,7 @@ class InstallWizard(WindowModalDialog, WizardBase):
         'restore', and kind the index of the wallet kind chosen."""
 
         actions = [_("Create a new wallet"),
-                   _("Restore a wallet or import keys")]
+                   _("Restore a wallet from seed words or from keys")]
         title = _("Electrum could not find an existing wallet.")
         actions_clayout = ChoicesLayout(_("What do you want to do?"), actions)
         wallet_clayout = ChoicesLayout(_("Wallet kind:"), wallet_kinds)
@@ -267,26 +274,15 @@ class InstallWizard(WindowModalDialog, WizardBase):
         action = ['create', 'restore'][actions_clayout.selected_index()]
         return action, wallet_clayout.selected_index()
 
-    def query_hw_wallet_choice(self, msg, action, choices):
-        actions = [_("Initialize a new or wiped device"),
-                   _("Use a device you have already set up"),
-                   _("Restore Electrum wallet from device seed words")]
-        default_action = 1 if action == 'create' else 2
-        actions_clayout = ChoicesLayout(_("What do you want to do?"), actions,
-                                        checked_index=default_action)
-        wallet_clayout = ChoicesLayout(msg, choices)
-
+    def query_hw_wallet_choice(self, msg, choices):
         vbox = QVBoxLayout()
-        vbox.addLayout(actions_clayout.layout())
-        vbox.addLayout(wallet_clayout.layout())
-        self.set_main_layout(vbox)
-        self.next_button.setEnabled(len(choices) != 0)
-
-        if actions_clayout.selected_index() == 2:
-            action = 'restore'
+        if choices:
+            wallet_clayout = ChoicesLayout(msg, choices)
+            vbox.addLayout(wallet_clayout.layout())
         else:
-            action = 'create'
-        return action, wallet_clayout.selected_index()
+            vbox.addWidget(QLabel(msg, wordWrap=True))
+        self.set_main_layout(vbox, next_enabled=len(choices) != 0)
+        return wallet_clayout.selected_index() if choices else 0
 
     def request_many(self, n, xpub_hot=None):
         vbox = QVBoxLayout()
@@ -357,32 +353,39 @@ class InstallWizard(WindowModalDialog, WizardBase):
 
     def query_multisig(self, action):
         cw = CosignWidget(2, 2)
-        m_edit = QSpinBox()
-        n_edit = QSpinBox()
-        m_edit.setValue(2)
-        n_edit.setValue(2)
+        m_edit = QSlider(Qt.Horizontal, self)
+        n_edit = QSlider(Qt.Horizontal, self)
         n_edit.setMinimum(2)
         n_edit.setMaximum(15)
         m_edit.setMinimum(1)
         m_edit.setMaximum(2)
-        n_edit.valueChanged.connect(m_edit.setMaximum)
+        n_edit.setValue(2)
+        m_edit.setValue(2)
 
-        n_edit.valueChanged.connect(cw.set_n)
-        m_edit.valueChanged.connect(cw.set_m)
-
-        hbox = QHBoxLayout()
-        hbox.addWidget(QLabel(_('Require')))
-        hbox.addWidget(m_edit)
-        hbox.addWidget(QLabel(_('of')))
-        hbox.addWidget(n_edit)
-        hbox.addWidget(QLabel(_('signatures')))
-        hbox.addStretch(1)
+        n_label = QLabel()
+        m_label = QLabel()
+        grid = QGridLayout()
+        grid.addWidget(n_label, 0, 0)
+        grid.addWidget(n_edit, 0, 1)
+        grid.addWidget(m_label, 1, 0)
+        grid.addWidget(m_edit, 1, 1)
+        def on_m(m):
+            m_label.setText(_('Require %d signatures')%m)
+            cw.set_m(m)
+        def on_n(n):
+            n_label.setText(_('From %d cosigners')%n)
+            cw.set_n(n)
+            m_edit.setMaximum(n)
+        n_edit.valueChanged.connect(on_n)
+        m_edit.valueChanged.connect(on_m)
+        on_n(2)
+        on_m(2)
 
         vbox = QVBoxLayout()
         vbox.addWidget(cw)
         vbox.addWidget(WWLabel(_("Choose the number of signatures needed "
                           "to unlock funds in your wallet:")))
-        vbox.addLayout(hbox)
+        vbox.addLayout(grid)
         self.set_main_layout(vbox, _("Multi-Signature Wallet"))
         m = int(m_edit.value())
         n = int(n_edit.value())

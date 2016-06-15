@@ -7,6 +7,7 @@ import os
 import sys
 import platform
 import imp
+import argparse
 
 version = imp.load_source('version', 'lib/version.py')
 
@@ -17,7 +18,8 @@ data_files = []
 
 if False and platform.system() in ['Linux', 'FreeBSD', 'DragonFly']:
     usr_share = os.path.join(sys.prefix, "share")
-    if not os.access(usr_share, os.W_OK):
+    if not os.access(opts.root_path + usr_share, os.W_OK) and \
+       not os.access(opts.root_path, os.W_OK):
         if 'XDG_DATA_HOME' in os.environ.keys():
             usr_share = os.environ['$XDG_DATA_HOME']
         else:
@@ -78,4 +80,3 @@ setup(
     license="GNU GPLv3",
     url="https://lbry.io",
     long_description="""Lightweight LBRYcrd Wallet"""
-)

@@ -1,20 +1,28 @@
 #!/usr/bin/env python
 #
 # Electrum - lightweight Bitcoin client
-# Copyright (C) 2011 thomasv@gitorious
+# Copyright (C) 2011 Thomas Voegtlin
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+# Permission is hereby granted, free of charge, to any person
+# obtaining a copy of this software and associated documentation files
+# (the "Software"), to deal in the Software without restriction,
+# including without limitation the rights to use, copy, modify, merge,
+# publish, distribute, sublicense, and/or sell copies of the Software,
+# and to permit persons to whom the Software is furnished to do so,
+# subject to the following conditions:
 #
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-# GNU General Public License for more details.
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
 #
-# You should have received a copy of the GNU General Public License
-# along with this program. If not, see <http://www.gnu.org/licenses/>.
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+# BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+# ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+# CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
 
 
 # Note: The deserialization code originally comes from ABE.
@@ -511,6 +519,7 @@ class Transaction:
             raise BaseException("cannot initialize transaction", raw)
         self._inputs = None
         self._outputs = None
+        self.locktime = 0
 
     def update(self, raw):
         self.raw = raw
@@ -583,7 +592,7 @@ class Transaction:
         for privkey in privkeys:
             pubkey = public_key_from_private_key(privkey)
             address = address_from_private_key(privkey)
-            u = network.synchronous_get(('blockchain.address.listunspent',[address]))
+            u = network.synchronous_get(('blockchain.address.listunspent', [address]))
             pay_script = klass.pay_script(TYPE_ADDRESS, address)
             for item in u:
                 item['scriptPubKey'] = pay_script
@@ -703,10 +712,14 @@ class Transaction:
         s += int_to_hex(txin['prevout_n'], 4)
         # Script length, script, sequence
         script = self.input_script(txin, i, for_sig)
-        s += var_int(len(script) / 2)
+        s += var_int(len(script)/2)
         s += script
-        s += "ffffffff"
+        s += int_to_hex(txin.get('sequence', 0xffffffff), 4)
         return s
+
+    def set_sequence(self, n):
+        for txin in self.inputs():
+            txin['sequence'] = n
 
     def BIP_LI01_sort(self):
         # See https://github.com/kristovatlas/rfc/blob/master/bips/bip-li01.mediawiki
@@ -716,27 +729,27 @@ class Transaction:
     def serialize(self, for_sig=None):
         inputs = self.inputs()
         outputs = self.outputs()
-        s  = int_to_hex(1,4)                                         # version
-        s += var_int( len(inputs) )                                  # number of inputs
+        s = int_to_hex(1, 4)                                         # version
+        s += var_int(len(inputs))                                    # number of inputs
         for i, txin in enumerate(inputs):
             s += self.serialize_input(txin, i, for_sig)
-        s += var_int( len(outputs) )                                 # number of outputs
+        s += var_int(len(outputs))                                   # number of outputs
         for output in outputs:
             output_type, addr, amount = output
-            s += int_to_hex( amount, 8)                              # amount
+            s += int_to_hex(amount, 8)                               # amount
             script = self.pay_script(output_type, addr)
-            s += var_int( len(script)/2 )                           #  script length
-            s += script                                             #  script
-        s += int_to_hex(0,4)                                        #  lock time
+            s += var_int(len(script)/2)                              #  script length
+            s += script                                              #  script
+        s += int_to_hex(self.locktime, 4)                            #  locktime
         if for_sig is not None and for_sig != -1:
-            s += int_to_hex(1, 4)                                   #  hash type
+            s += int_to_hex(1, 4)                                    #  hash type
         return s
 
     def tx_for_sig(self,i):
         return self.serialize(for_sig = i)
 
     def hash(self):
-        return Hash(self.raw.decode('hex') )[::-1].encode('hex')
+        return Hash(self.raw.decode('hex'))[::-1].encode('hex')
 
     def add_inputs(self, inputs):
         self._inputs.extend(inputs)
@@ -758,15 +771,6 @@ class Transaction:
     def is_final(self):
         return not any([x.get('sequence') < 0xffffffff - 1 for x in self.inputs()])
 
-    @classmethod
-    def fee_for_size(self, relay_fee, fee_per_kb, size):
-        '''Given a fee per kB in satoshis, and a tx size in bytes,
-        returns the transaction fee.'''
-        fee = int(fee_per_kb * size / 1000.)
-        if fee < relay_fee:
-            fee = relay_fee
-        return fee
-
     @profiler
     def estimated_size(self):
         '''Return an estimated tx size in bytes.'''
@@ -776,10 +780,6 @@ class Transaction:
     def estimated_input_size(self, txin):
         '''Return an estimated of serialized input size in bytes.'''
         return len(self.serialize_input(txin, -1, -1)) / 2
-
-    def estimated_fee(self, relay_fee, fee_per_kb):
-        '''Return an estimated fee given a fee per kB in satoshis.'''
-        return self.fee_for_size(relay_fee, fee_per_kb, self.estimated_size())
 
     def signature_count(self):
         r = 0
@@ -882,7 +882,8 @@ class Transaction:
         self.deserialize()
         out = {
             'hex': self.raw,
-            'complete': self.is_complete()
+            'complete': self.is_complete(),
+            'final': self.is_final(),
         }
         return out
 
@@ -908,3 +909,20 @@ class Transaction:
         print_error(priority, threshold)
 
         return priority < threshold
+
+
+
+def tx_from_str(txt):
+    "json or raw hexadecimal"
+    import json
+    txt = txt.strip()
+    try:
+        txt.decode('hex')
+        is_hex = True
+    except:
+        is_hex = False
+    if is_hex:
+        return txt
+    tx_dict = json.loads(str(txt))
+    assert "hex" in tx_dict.keys()
+    return tx_dict["hex"]

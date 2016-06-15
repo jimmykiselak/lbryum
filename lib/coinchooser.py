@@ -3,22 +3,28 @@
 # Electrum - lightweight Bitcoin client
 # Copyright (C) 2015 kyuupichan@gmail
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+# Permission is hereby granted, free of charge, to any person
+# obtaining a copy of this software and associated documentation files
+# (the "Software"), to deal in the Software without restriction,
+# including without limitation the rights to use, copy, modify, merge,
+# publish, distribute, sublicense, and/or sell copies of the Software,
+# and to permit persons to whom the Software is furnished to do so,
+# subject to the following conditions:
 #
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-# GNU General Public License for more details.
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
 #
-# You should have received a copy of the GNU General Public License
-# along with this program. If not, see <http://www.gnu.org/licenses/>.
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+# BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+# ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+# CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
 
 from collections import defaultdict, namedtuple
 from math import floor, log10
-import struct
 
 from bitcoin import sha256, COIN, TYPE_ADDRESS
 from transaction import Transaction
@@ -43,22 +49,23 @@ class PRNG:
         result, self.pool = self.pool[:n], self.pool[n:]
         return result
 
-    def random(self):
-        # Returns random double in [0, 1)
-        four = self.get_bytes(4)
-        return struct.unpack("I", four)[0] / 4294967296.0
-
     def randint(self, start, end):
         # Returns random integer in [start, end)
-        return start + int(self.random() * (end - start))
+        n = end - start
+        r = 0
+        p = 1
+        while p < n:
+            r = self.get_bytes(1)[0] + (r << 8)
+            p = p << 8
+        return start + (r % n)
 
     def choice(self, seq):
-        return seq[int(self.random() * len(seq))]
+        return seq[self.randint(0, len(seq))]
 
     def shuffle(self, x):
         for i in reversed(xrange(1, len(x))):
             # pick an element in x[:i+1] with which to exchange x[i]
-            j = int(self.random() * (i+1))
+            j = self.randint(0, i+1)
             x[i], x[j] = x[j], x[i]
 
 
@@ -288,10 +295,6 @@ class CoinChooserPrivacy(CoinChooserRandom):
     def keys(self, coins):
         return [coin['address'] for coin in coins]
 
-    def penalty_func(self, buckets, tx):
-        '''Returns a penalty for a candidate set of buckets.'''
-        raise NotImplementedError
-
     def penalty_func(self, tx):
         min_change = min(o[2] for o in tx.outputs()) * 0.75
         max_change = max(o[2] for o in tx.outputs()) * 1.33
@@ -315,3 +318,13 @@ class CoinChooserPrivacy(CoinChooserRandom):
 
 COIN_CHOOSERS = {'Priority': CoinChooserOldestFirst,
                  'Privacy': CoinChooserPrivacy}
+
+def get_name(config):
+    kind = config.get('coin_chooser')
+    if not kind in COIN_CHOOSERS:
+        kind = 'Priority'
+    return kind
+
+def get_coin_chooser(config):
+    klass = COIN_CHOOSERS[get_name(config)]
+    return klass()
